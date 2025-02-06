@@ -264,18 +264,39 @@ def scrape_data(limit):
             print()
             print("-" * 57)
 
+            # # 7. Smart Score z iframe TipRanks
+            # try:
+            #     iframe = driver.find_element(By.CSS_SELECTOR, "iframe[src*='tipranks']")
+            #     driver.switch_to.frame(iframe)
+            #     smart_score_element = driver.find_element(By.CLASS_NAME, "sc-cGXZpB.hINHXp")
+            #     smart_score = smart_score_element.text
+            #     stats["Smart Score"] = smart_score
+            # except Exception as iframe_error:
+            #     # Jeżeli nie znajdziemy iframe, wstawiamy None
+            #     stats["Smart Score"] = None
+            # finally:
+            #     # powrót do głównej strony
+            #     driver.switch_to.default_content()
+
             # 7. Smart Score z iframe TipRanks
             try:
                 iframe = driver.find_element(By.CSS_SELECTOR, "iframe[src*='tipranks']")
                 driver.switch_to.frame(iframe)
-                smart_score_element = driver.find_element(By.CLASS_NAME, "sc-cGXZpB.hINHXp")
+
+                # Pobieramy element DIV, który posiada klasy "sc-jBIHhB" oraz "bqMmLN"
+                smart_score_container = driver.find_element(By.CSS_SELECTOR, "div.sc-jBIHhB.bqMmLN")
+
+                # Pobieramy element <text> wewnątrz tego DIVa (możesz też bezpośrednio użyć .text na smart_score_container,
+                # jeśli nie ma innych treści)
+                smart_score_element = smart_score_container.find_element(By.TAG_NAME, "text")
                 smart_score = smart_score_element.text
+
                 stats["Smart Score"] = smart_score
             except Exception as iframe_error:
-                # Jeżeli nie znajdziemy iframe, wstawiamy None
+                # Jeżeli nie znajdziemy iframe lub elementu, wstawiamy None
                 stats["Smart Score"] = None
             finally:
-                # powrót do głównej strony
+                # Powrót do głównej strony
                 driver.switch_to.default_content()
 
             # 8. Dane finansowe (Revenue, Net Income, itp.)
@@ -602,18 +623,39 @@ def retry_drops(drops):
                 value_text = value.text.strip()
                 stats[key_text] = value_text
 
+            # # 7. Smart Score z iframe TipRanks
+            # try:
+            #     iframe = driver.find_element(By.CSS_SELECTOR, "iframe[src*='tipranks']")
+            #     driver.switch_to.frame(iframe)
+            #     smart_score_element = driver.find_element(By.CLASS_NAME, "sc-cGXZpB.hINHXp")
+            #     smart_score = smart_score_element.text
+            #     stats["Smart Score"] = smart_score
+            # except Exception as iframe_error:
+            #     # Jeżeli nie znajdziemy iframe, wstawiamy NaN
+            #     stats["Smart Score"] = float('nan')
+            #     print(f"Brak danych Smart Score dla spółki {symbol}.")
+            #     print(iframe_error)
+            # finally:
+            #     # Powrót do głównej strony
+            #     driver.switch_to.default_content()
+
             # 7. Smart Score z iframe TipRanks
             try:
                 iframe = driver.find_element(By.CSS_SELECTOR, "iframe[src*='tipranks']")
                 driver.switch_to.frame(iframe)
-                smart_score_element = driver.find_element(By.CLASS_NAME, "sc-cGXZpB.hINHXp")
+
+                # Pobieramy element DIV, który posiada klasy "sc-jBIHhB" oraz "bqMmLN"
+                smart_score_container = driver.find_element(By.CSS_SELECTOR, "div.sc-jBIHhB.bqMmLN")
+
+                # Pobieramy element <text> wewnątrz tego DIVa (możesz też bezpośrednio użyć .text na smart_score_container,
+                # jeśli nie ma innych treści)
+                smart_score_element = smart_score_container.find_element(By.TAG_NAME, "text")
                 smart_score = smart_score_element.text
+
                 stats["Smart Score"] = smart_score
             except Exception as iframe_error:
-                # Jeżeli nie znajdziemy iframe, wstawiamy NaN
-                stats["Smart Score"] = float('nan')
-                print(f"Brak danych Smart Score dla spółki {symbol}.")
-                print(iframe_error)
+                # Jeżeli nie znajdziemy iframe lub elementu, wstawiamy None
+                stats["Smart Score"] = None
             finally:
                 # Powrót do głównej strony
                 driver.switch_to.default_content()
@@ -1123,7 +1165,7 @@ if __name__ == "__main__":
     current_time, hour_timestamp, date_timestamp = get_current_timestamps()
 
     # uruchamianie głównej funkcji scrapującej
-    df, drops = scrape_data(limit=505)
+    df, drops = scrape_data(limit=1)
 
     df = process_retries(drops, df)
 
