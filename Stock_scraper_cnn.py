@@ -1149,8 +1149,8 @@ def save_df_to_csv(df, output_csv_path):
 #Uruchomienie całej aplikacji
 if __name__ == "__main__":
     BASE_URL = "https://edition.cnn.com/markets/stocks/"
-    SYMBOL_CSV_PATH = "/Users/michal/PycharmProjects/Stock Scraper/sp500symbols.csv"
-    # SYMBOL_CSV_PATH = "/Users/michal/PycharmProjects/Stock Scraper/retrylist.csv"
+    # SYMBOL_CSV_PATH = "/Users/michal/PycharmProjects/Stock Scraper/sp500symbols.csv"
+    SYMBOL_CSV_PATH = "/Users/michal/PycharmProjects/Stock Scraper/retrylist.csv"
 
     # Pobieramy unikalną listę URL-i spółek
     stocks = get_stock_urls(SYMBOL_CSV_PATH, BASE_URL)
@@ -1165,7 +1165,7 @@ if __name__ == "__main__":
     current_time, hour_timestamp, date_timestamp = get_current_timestamps()
 
     # uruchamianie głównej funkcji scrapującej
-    df, drops = scrape_data(limit=505)
+    df, drops = scrape_data(limit=1)
 
     df = process_retries(drops, df)
 
