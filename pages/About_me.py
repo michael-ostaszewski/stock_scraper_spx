@@ -33,11 +33,17 @@ def get_base64_image(path):
     with open(path, "rb") as file:
         return base64.b64encode(file.read()).decode()
 
-# Ścieżki do obrazów
-profile_picture_path = "/Users/michal/PycharmProjects/Stock Scraper/Images/DSC08336.jpg"
-linkedin_logo_path = "/Users/michal/PycharmProjects/Stock Scraper/Images/LinkedIn_logo_initials.png"
-github_logo_path = "/Users/michal/PycharmProjects/Stock Scraper/Images/Octicons-mark-github.svg.png"
-email_logo_path = "/Users/michal/PycharmProjects/Stock Scraper/Images/Gmail_icon_(2020).svg.png"
+# # Ścieżki do obrazów
+# profile_picture_path = "/Users/michal/PycharmProjects/Stock Scraper/Images/DSC08336.jpg"
+# linkedin_logo_path = "/Users/michal/PycharmProjects/Stock Scraper/Images/LinkedIn_logo_initials.png"
+# github_logo_path = "/Users/michal/PycharmProjects/Stock Scraper/Images/Octicons-mark-github.svg.png"
+# email_logo_path = "/Users/michal/PycharmProjects/Stock Scraper/Images/Gmail_icon_(2020).svg.png"
+
+# # Ścieżki do obrazów
+profile_picture_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/DSC08336.jpg"
+linkedin_logo_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/LinkedIn_logo_initials.png"
+github_logo_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/Octicons-mark-github.svg.png"
+email_logo_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/Gmail_icon_(2020).svg.png"
 
 # Konwersja obrazów na Base64
 linkedin_logo_base64 = get_base64_image(linkedin_logo_path)
@@ -103,7 +109,7 @@ st.markdown("""
     Thanks for taking the time to read this. Feel free to **connect with me on [LinkedIn](https://www.linkedin.com/in/michael-ostaszewski/)** or check out my **[projects on GitHub](https://github.com/michael-ostaszewski/)**.
 """, unsafe_allow_html=True)
 
-st.image("/Users/michal/PycharmProjects/Stock Scraper/Images/_DSC3581.jpg", caption="Collecting photons from millions of stars in our galaxy for my Milky Way Project, Namibia 2021.", width=700)
+st.image("https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/_DSC3581.jpg", caption="Collecting photons from millions of stars in our galaxy for my Milky Way Project, Namibia 2021.", width=700)
 
 
 st.markdown("<hr>", unsafe_allow_html=True)
