@@ -1,10 +1,10 @@
-import streamlit as st
-import base64
-
-st.set_page_config(
-    page_title="Your App Title",  # opcjonalnie, tytuł strony
-    layout="centered"                 # ustawienie szerokiego układu
-)
+# import streamlit as st
+# import base64
+#
+# st.set_page_config(
+#     page_title="Your App Title",  # opcjonalnie, tytuł strony
+#     layout="centered"                 # ustawienie szerokiego układu
+# )
 
 # st.title("Hi, I'm Michał Ostaszewski 👋")
 
@@ -28,10 +28,10 @@ st.set_page_config(
 #     </div>
 # """, unsafe_allow_html=True)
 
-# Funkcja do konwertowania lokalnego obrazu na URL
-def get_base64_image(path):
-    with open(path, "rb") as file:
-        return base64.b64encode(file.read()).decode()
+# # Funkcja do konwertowania lokalnego obrazu na URL
+# def get_base64_image(path):
+#     with open(path, "rb") as file:
+#         return base64.b64encode(file.read()).decode()
 
 # # Ścieżki do obrazów
 # profile_picture_path = "/Users/michal/PycharmProjects/Stock Scraper/Images/DSC08336.jpg"
@@ -39,14 +39,43 @@ def get_base64_image(path):
 # github_logo_path = "/Users/michal/PycharmProjects/Stock Scraper/Images/Octicons-mark-github.svg.png"
 # email_logo_path = "/Users/michal/PycharmProjects/Stock Scraper/Images/Gmail_icon_(2020).svg.png"
 
-# # Ścieżki do obrazów
-profile_picture_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/DSC08336.jpg"
+# # # Ścieżki do obrazów
+# profile_picture_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/DSC08336.jpg"
 # linkedin_logo_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/LinkedIn_logo_initials.png"
-github_logo_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/Octicons-mark-github.svg.png"
-email_logo_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/Gmail_icon_(2020).svg.png"
+# github_logo_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/Octicons-mark-github.svg.png"
+# email_logo_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/Gmail_icon_(2020).svg.png"
+
+
+import streamlit as st
+import base64
+import requests
+
+st.set_page_config(
+    page_title="Your App Title",
+    layout="centered"
+)
+
+# Funkcja do konwertowania lokalnego obrazu lub pobrania go z URL
+def get_base64_image(path):
+    if path.startswith("http"):
+        response = requests.get(path)
+        if response.status_code == 200:
+            return base64.b64encode(response.content).decode()
+        else:
+            raise FileNotFoundError(f"Nie udało się pobrać obrazu z URL: {path}")
+    else:
+        with open(path, "rb") as file:
+            return base64.b64encode(file.read()).decode()
+
+# Poprawione URL-e do plików
+profile_picture_path = "https://raw.githubusercontent.com/michael-ostaszewski/stock_scraper_spx/main/Images/DSC08336.jpg"
+linkedin_logo_path = "https://raw.githubusercontent.com/michael-ostaszewski/stock_scraper_spx/main/Images/LinkedIn_logo_initials.png"
+github_logo_path = "https://raw.githubusercontent.com/michael-ostaszewski/stock_scraper_spx/main/Images/Octicons-mark-github.svg.png"
+email_logo_path = "https://raw.githubusercontent.com/michael-ostaszewski/stock_scraper_spx/main/Images/Gmail_icon_(2020).svg.png"
+
 
 # Konwersja obrazów na Base64
-# linkedin_logo_base64 = get_base64_image(linkedin_logo_path)
+linkedin_logo_base64 = get_base64_image(linkedin_logo_path)
 github_logo_base64 = get_base64_image(github_logo_path)
 email_logo_base64 = get_base64_image(email_logo_path)
 
