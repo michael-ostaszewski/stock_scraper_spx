@@ -138,7 +138,7 @@ st.markdown("""
     Thanks for taking the time to read this. Feel free to **connect with me on [LinkedIn](https://www.linkedin.com/in/michael-ostaszewski/)** or check out my **[projects on GitHub](https://github.com/michael-ostaszewski/)**.
 """, unsafe_allow_html=True)
 
-st.image("https://raw.githubusercontent.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/_DSC3581.jpg", caption="Collecting photons from millions of stars in our galaxy for my Milky Way Project, Namibia 2021.", width=700)
+st.image("https://raw.githubusercontent.com/michael-ostaszewski/stock_scraper_spx/main/Images/_DSC3581.jpg", caption="Collecting photons from millions of stars in our galaxy for my Milky Way Project, Namibia 2021.", width=700)
 
 
 st.markdown("<hr>", unsafe_allow_html=True)
