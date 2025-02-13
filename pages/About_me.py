@@ -41,12 +41,12 @@ def get_base64_image(path):
 
 # # Ścieżki do obrazów
 profile_picture_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/DSC08336.jpg"
-linkedin_logo_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/LinkedIn_logo_initials.png"
+# linkedin_logo_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/LinkedIn_logo_initials.png"
 github_logo_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/Octicons-mark-github.svg.png"
 email_logo_path = "https://github.com/michael-ostaszewski/stock_scraper_spx/blob/main/Images/Gmail_icon_(2020).svg.png"
 
 # Konwersja obrazów na Base64
-linkedin_logo_base64 = get_base64_image(linkedin_logo_path)
+# linkedin_logo_base64 = get_base64_image(linkedin_logo_path)
 github_logo_base64 = get_base64_image(github_logo_path)
 email_logo_base64 = get_base64_image(email_logo_path)
 
