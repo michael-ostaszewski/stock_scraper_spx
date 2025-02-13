@@ -3,8 +3,11 @@ import pandas as pd
 
 @st.cache_data
 def load_data():
-    file_path = '/Users/michal/PycharmProjects/Stock Scraper/stocks/stocks_data.csv'
-    data = pd.read_csv(file_path, delimiter=';')
+    # file_path = '/Users/michal/PycharmProjects/Stock Scraper/stocks/stocks_data.csv'
+    # data = pd.read_csv(file_path, delimiter=';')
+    # return data
+    file_url = "https://raw.githubusercontent.com/michael-ostaszewski/stock_scraper_spx/main/stocks/stocks_data.csv"
+    data = pd.read_csv(file_url, delimiter=';')
     return data
 
 # Wczytujemy dane
