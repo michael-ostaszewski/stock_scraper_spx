@@ -1166,7 +1166,8 @@ if __name__ == "__main__":
     current_time, hour_timestamp, date_timestamp = get_current_timestamps()
 
     # uruchamianie głównej funkcji scrapującej
-    df, drops = scrape_data(limit=505)
+    # df, drops = scrape_data(limit=5) #retry
+    df, drops = scrape_data(limit=505) #all
 
     df = process_retries(drops, df)
 
