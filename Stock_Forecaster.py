@@ -3,7 +3,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import time
-# import openai  # Jeśli korzystasz z OpenAI
 from openai import OpenAI
 
 ######### początek kodu CSS - tu jest kod CSS do stylizowania strony - początek ########
