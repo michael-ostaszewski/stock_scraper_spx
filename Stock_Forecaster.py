@@ -157,11 +157,11 @@ with st.expander("AI Comment About Selected Stocks"):
     # Model selection with tooltips
     model_choice = st.selectbox(
         "Choose the LLM Model",
-        ["gpt-3.5-turbo", "gpt-4o-mini", "gpt-4o", "gpt-o3-mini"],
+        ["gpt-3.5-turbo", "gpt-4o-mini", "gpt-4o", "o3-mini"],
         help=(
             "Select which large language model(LLM) to use for generating the AI commentary.\n"
             "Note: Response accuracy may vary and should be verified. "
-            "Usage is limited to one comment per 3 minutes due to cost constraints.\n\n"
+            "Usage is limited to one comment per 2 minutes due to cost constraints.\n\n"
             "Model Characteristics:\n\n"
             "• gpt-3.5-turbo: Intelligence: Low, Speed: Slow\n\n"
             "• gpt-4o-mini: Intelligence: Average, Speed: Fast\n\n"
@@ -269,8 +269,8 @@ with st.expander("AI Comment About Selected Stocks"):
     if st.button("Generate AI Comment About Selected Stocks"):
         current_time = time.time()
         # Check if 60 seconds have passed since last invocation
-        if current_time - st.session_state["last_click_time"] < 180:
-            st.warning("Please wait at least 60 seconds before generating another AI comment.")
+        if current_time - st.session_state["last_click_time"] < 120:
+            st.warning("Please wait at least 120 seconds before generating another AI comment.")
         else:
             if best_three.empty:
                 st.info("No stocks available in the result – cannot generate commentary.")
