@@ -157,7 +157,7 @@ with st.expander("AI Comment About Selected Stocks"):
     # Model selection with tooltips
     model_choice = st.selectbox(
         "Choose the LLM Model",
-        ["gpt-3.5-turbo", "gpt-4o-mini", "gpt-4o", "o3-mini"],
+        ["gpt-3.5-turbo", "gpt-4o-mini", "gpt-4o"],
         help=(
             "Select which large language model(LLM) to use for generating the AI commentary.\n"
             "Note: Response accuracy may vary and should be verified. "
@@ -166,7 +166,7 @@ with st.expander("AI Comment About Selected Stocks"):
             "• gpt-3.5-turbo: Intelligence: Low, Speed: Slow\n\n"
             "• gpt-4o-mini: Intelligence: Average, Speed: Fast\n\n"
             "• gpt-4o: Intelligence: High, Speed: Medium\n\n"
-            "• o3-mini: Intelligence: Higher, Speed: Medium"
+            # "• o3-mini: Intelligence: Higher, Speed: Medium"
         )
     )
 
