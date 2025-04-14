@@ -75,7 +75,7 @@ def investment_calculator():
         additional_deposit_amount = st.number_input(
             "Single additional deposit amount (USD)",
             min_value=0.0,
-            value=100.0,
+            value=1.0,
             step=50.0
         )
         deposit_frequency = st.selectbox(
