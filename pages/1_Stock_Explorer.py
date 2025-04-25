@@ -1,6 +1,41 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
+
+
+######### początek kodu CSS - tu jest kod CSS do stylizowania strony - początek ########
+st.markdown(
+    """
+    <style>
+    /* This CSS makes metric values bold */
+    [data-testid="stMetricValue"] {
+        font-weight: bold;
+    }
+    /* Optionally: make metric labels bold as well */
+    [data-testid="stMetricLabel"] {
+        font-weight: bold;
+    }
+    </style>
+    <style>
+    div.stButton > button {
+    width: 100%;
+        color: #ffffff; /* White text */
+        background-image: linear-gradient(to right, #034980, #0277bd); /* Dark blue gradient */
+        border: 2px solid #0277bd;
+        font-size: 16px;
+        font-weight: bold;
+        transition: background-image 0.3s ease, transform 0.3s ease;
+    }
+    .full-width-blue-button > button:hover {
+        background-image: linear-gradient(to right, #388e3c, #66bb6a); /* Green gradient on hover */
+        transform: scale(1.02);
+    }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 
 @st.cache_data
@@ -198,16 +233,115 @@ if company_details is not None and not company_details.empty:
 else:
     st.info("Please enter a valid ticker symbol to view forecast and current price trends.")
 
+st.markdown("<hr>", unsafe_allow_html=True)
+
+# -------------------------------------------------
+# Dividend Timeline & Yield
+# -------------------------------------------------
+
+st.header("Dividend Timeline & Yield")
+
+# Build the chart only when a company is selected
+if company_details is not None and not company_details.empty:
+    # A dividend is considered “paid” when Dividend yield is present and > 0
+    has_dividend = company_details["Dividend yield"].notna() & (company_details["Dividend yield"] > 0)
+
+    if has_dividend.any():
+        # Ensure the required columns exist
+        div_cols = ["Ex-dividend date", "Dividend pay date", "Dividend yield", "Stock"]
+        missing_div_cols = [col for col in div_cols if col not in company_details.columns]
+        if missing_div_cols:
+            st.error(f"Missing columns for dividend information: {missing_div_cols}")
+        else:
+            df_div = company_details.loc[has_dividend, div_cols].copy()
+
+            # Convert date strings to real datetime objects
+            df_div["Ex-dividend date"] = pd.to_datetime(df_div["Ex-dividend date"])
+            df_div["Dividend pay date"] = pd.to_datetime(df_div["Dividend pay date"])
+
+            # Show the latest dividend yield as a quick metric
+            latest_yield = df_div["Dividend yield"].iloc[-1]
+            # st.metric("Latest Dividend Yield", f"{latest_yield:.2f}%")
+
+            # ───── metrics side-by-side ─────────────────────────────────────────
+            col1, col2 = st.columns(2)
+
+            # 1) Yield (already calculated)
+            col1.metric("Latest dividend yield", f"{latest_yield:.2f}%")
+
+            # 2) Cash amount of the most recent dividend per share
+            latest_price = company_details["Price"].iloc[-1]
+
+            # If the yield is stored as “6.37”, turn it into a fraction; if it is already
+            # 0.0637 leave it unchanged. (Anything > 1 is assumed to be percent-points.)
+            yield_fraction = latest_yield / 100
+            latest_dividend_usd = latest_price * yield_fraction
+
+            col2.metric("Yearly dividend value in USD per share", f"${latest_dividend_usd:.2f}")
+
+            df_div["Dividend yield"] = df_div["Dividend yield"] / 100
+
+            # Build a horizontal timeline (one row per dividend period)
+            fig_timeline = px.timeline(
+                df_div,
+                x_start="Ex-dividend date",
+                x_end="Dividend pay date",
+                y="Stock",
+                hover_data={
+                    "Stock": True,
+                    "Ex-dividend date": "|%Y-%m-%d",
+                    "Dividend pay date": "|%Y-%m-%d",
+                    "Dividend yield": ":.2%"
+                },
+                color="Stock",
+                title="Timeline: Ex-Dividend and Dividend Pay Dates"
+            )
+
+
+            # Focus the x-axis on ±30 / +90 days around “today”
+            today = pd.Timestamp.now().floor("D")
+            fig_timeline.update_xaxes(
+                tickformat="%Y-%m-%d",
+                range=[today - pd.DateOffset(days=30),
+                       today + pd.DateOffset(days=90)],
+                showgrid=True, gridcolor="rgba(128,128,128,0.2)"
+            )
+            fig_timeline.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.2)")
+            fig_timeline.add_vline(
+                x=today,
+                line_width=2,
+                line_dash="solid",
+                line_color="rgba(0,0,0,0.8)"
+            )
+            fig_timeline.update_layout(
+                xaxis_title="Date",
+                yaxis_title="Stock",
+                height=450,
+                dragmode="pan",
+                showlegend=False
+            )
+
+            st.plotly_chart(fig_timeline, use_container_width=True)
+
+    else:
+        st.info("This company currently does **not** pay a dividend.")
+else:
+    st.info("Please enter a valid ticker symbol to view dividend information.")
 
 
 st.markdown("<hr>", unsafe_allow_html=True)
+
+st.markdown("""\
+Please note: Investing involves risk and you may lose some or all of your capital. 
+This site is provided for informational purposes only and does not constitute financial advice.
+""")
+# st.markdown("<hr>", unsafe_allow_html=True)
 
 st.markdown("""
     <p style="font-size: 12px; text-align: left; color: gray;">
         Website made by @Michał Ostaszewski
     </p>
 """, unsafe_allow_html=True)
-
 
 
 
@@ -406,4 +540,7 @@ st.markdown("""
 #         Website made by @Michał Ostaszewski
 #     </p>
 # """, unsafe_allow_html=True)
+
+
+
 
