@@ -323,3 +323,18 @@ def investment_calculator():
 
 if __name__ == "__main__":
     investment_calculator()
+
+
+st.markdown("<hr>", unsafe_allow_html=True)
+
+st.markdown("""\
+Please note: Investing involves risk and you may lose some or all of your capital. 
+This site is provided for informational purposes only and does not constitute financial advice.
+""")
+# st.markdown("<hr>", unsafe_allow_html=True)
+
+st.markdown("""
+    <p style="font-size: 12px; text-align: left; color: gray;">
+        Website made by @Michał Ostaszewski
+    </p>
+""", unsafe_allow_html=True)
