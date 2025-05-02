@@ -106,7 +106,7 @@ def investment_calculator():
                           min_value=1, max_value=20, value=15, step=1)
 
         # Calculate the date range based on the slider value
-        end_date = datetime.date.today()
+        end_date = datetime.date.today() - datetime.timedelta(days=1)
         start_date = end_date.replace(year=end_date.year - years)
 
         # Define the 3 main benchmarks
