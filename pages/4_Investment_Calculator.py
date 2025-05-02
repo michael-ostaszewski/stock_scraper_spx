@@ -119,14 +119,25 @@ def investment_calculator():
         # Calculate CAGR for each benchmark
         cagr_values = {}
         for name, symbol in benchmarks.items():
+            # data = yf.download(symbol, start=start_date, end=end_date, progress=False)
+            #
+            # # Access the closing prices using the MultiIndex (e.g., ("Close", symbol))
+            # start_price = data[("Close", symbol)][1]
+            # if len(data) > 30:
+            #     end_price = data[("Close", symbol)][-30]
+            # else:
+            #     end_price = data[("Close", symbol)][-1]
             data = yf.download(symbol, start=start_date, end=end_date, progress=False)
 
-            # Access the closing prices using the MultiIndex (e.g., ("Close", symbol))
-            start_price = data[("Close", symbol)][1]
-            if len(data) > 30:
-                end_price = data[("Close", symbol)][-30]
-            else:
-                end_price = data[("Close", symbol)][-1]
+            # Jeżeli nic nie pobrano – przerwij pętlę i pokaż brak danych
+            if data.empty or ("Close", symbol) not in data.columns or len(data[("Close", symbol)]) < 2:
+                st.warning(f"Brak danych lub ograniczenie rate‑limit dla {symbol}.")
+                cagr_values[name] = None
+                continue  # idź do następnego benchmarku
+
+            # bezpieczne pobranie pierwszej i ostatniej ceny
+            start_price = data[("Close", symbol)].iloc[0]
+            end_price = data[("Close", symbol)].iloc[-30] if len(data) > 30 else data[("Close", symbol)].iloc[-1]
 
             num_of_years = (data.index[-1] - data.index[0]).days / 365
             cagr = (end_price / start_price) ** (1 / num_of_years) - 1
