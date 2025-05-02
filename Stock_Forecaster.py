@@ -42,11 +42,6 @@ st.markdown(
 # Title of the application
 st.title("Best stocks in S&P500 Index")
 
-# # Subheader / short English heading
-# st.markdown("""This site aggregates and averages data from a wide range of financial analysts to identify
-#                 the best-performing stocks in the S&P 500 over a one-year horizon. By leveraging diverse insights,
-#                 we aim to provide a comprehensive view of market trends and investment opportunities using the latest Data Science techniques.""")
-# st.write("")
 
 # Loading data
 @st.cache_data
@@ -89,7 +84,17 @@ if all(col in filtered_data.columns for col in required_columns):
     # We create a selectbox for sectors
     sectors = sorted(filtered_data["Sector"].unique())
     sector_options = ["All Sectors"] + sectors
-    selected_sector = st.sidebar.selectbox("Select Sector", options=sector_options, index=0)
+    selected_sector = st.sidebar.selectbox("Select Sector",
+                                           options=sector_options,
+                                           index=0,
+                                           help=(
+                                               "Use this selector to filter the data by sector. This selector affects some of the charts – feel free to experiment.\n"
+                                               "Affected charts:\n"
+                                               " - Best stocks in S&P500 Index\n"
+                                               " - Selected stocks by our AI algorithm\n"
+                                               " - Median Forecast Percent vs. P/E ratio\n"
+                                               " - Historical Analyst Forecast Trends"))
+
 
     # Filter data according to certain criteria
     scoring = filtered_data[required_columns].sort_values("Score", ascending=False, ignore_index=True)
@@ -107,16 +112,16 @@ if all(col in filtered_data.columns for col in required_columns):
     scoring = scoring.round(2)
     total_stocks = scoring.shape[0]
 
-    if not scoring.empty:
-        max_stocks = st.sidebar.slider(
-            "Select number of stocks to display",
-            min_value=1,
-            max_value=total_stocks,
-            value=10 if total_stocks >= 10 else total_stocks,
-            step=1
-        )
-        # We limit the number of displayed stocks to 'max_stocks'
-        scoring = scoring.head(max_stocks)
+    # if not scoring.empty:
+    #     max_stocks = st.sidebar.slider(
+    #         "Select number of stocks to display",
+    #         min_value=1,
+    #         max_value=total_stocks,
+    #         value=10 if total_stocks >= 10 else total_stocks,
+    #         step=1
+    #     )
+    #     # We limit the number of displayed stocks to 'max_stocks'
+    #     scoring = scoring.head(max_stocks)
 
 else:
     # Dodajemy obsługę błędu w przypadku braku wymaganych kolumn
@@ -506,11 +511,26 @@ st.markdown("<hr>", unsafe_allow_html=True)
 st.header("Selected stocks by our AI algorithm")
 st.markdown(
     f"Our sophisticated algorithm, merging 9 variables, has identified {total_stocks} best stocks for today. "
-    f"You can further refine the list using the slider on the left sidebar to potentially achieve higher returns."
+    f"You can further refine the list using the slider below to potentially achieve higher returns or rebalance your portfolio."
 )
 
+
 # Compute medians for the filtered stocks
+# if not scoring.empty:
+
 if not scoring.empty:
+    # Tu wstawiamy nowy slider
+    max_stocks = st.slider(
+        "This slider affects also other charts below - as it creates Selected Stocks list ", #Use the slider to show more or fewer stocks on the chart.
+        min_value=1,
+        max_value=total_stocks,
+        value=10 if total_stocks >= 10 else total_stocks,
+        step=1
+    )
+
+    # Ograniczamy liczbę spółek dopiero teraz, tuż przed wykresem
+    scoring = scoring.head(max_stocks)
+
     med_low_scoring = scoring["Low Forecast Percent"].median()
     med_median_scoring = scoring["Median Forecast Percent"].median()
     med_high_scoring = scoring["High Forecast Percent"].median()
@@ -553,7 +573,7 @@ if not scoring.empty:
         x="Stock",
         y="Score",
         color="Sector",
-        title="Use the slider on the left sidebar to show more or fewer stocks in the chart.",
+        # title="Use the slider on the left sidebar to show more or fewer stocks in the chart.",
         category_orders=category_order,
         hover_data={
             "Price": True,
@@ -689,6 +709,11 @@ st.markdown("<hr>", unsafe_allow_html=True)
 
 # ----- NEW: Historical lines for the top N selected stocks -----
 
+st.header("Historical Analyst Forecast Trends")
+st.markdown("""
+This section displays the historical evolution of analyst forecast medians over time for both the entire S&P 500 and the top stocks selected by our AI algorithm. The forecasts are categorized as Low forecasts, Median Forecasts, and High Forecasts, allowing you to observe trends in analysts' expectations and compare the performance of filtered stocks against the broader market. Use the forecast type selector to focus on a specific forecast scenario.
+""")
+
 # 1. Identify the selected stocks from the final 'scoring'
 #    (these are top N chosen by the user)
 if not scoring.empty:
@@ -744,7 +769,7 @@ df_combined = pd.concat([df_all_melt, df_scoring_melt])
 
 # New forecast-type selector
 forecast_options = ["All forecasts", "High forecasts", "Med forecasts", "Low forecasts"]
-selected_forecast = st.sidebar.selectbox("Select forecast type", options=forecast_options, index=0, key="forecast_select")
+selected_forecast = st.selectbox("Select forecast type", options=forecast_options, index=0, key="forecast_select")
 
 # Filter data if user doesn't want all forecasts
 if selected_forecast != "All forecasts":
@@ -823,12 +848,6 @@ else:
         title=f"Comparison of Median Analyst Forecasts Over Time ({selected_forecast.title()})",
         markers=True
     )
-
-st.header("Historical Analyst Forecast Trends")
-st.markdown("""
-This section displays the historical evolution of analyst forecast medians over time for both the entire S&P 500 and the top stocks selected by our AI algorithm. The forecasts are categorized as Low forecasts, Median Forecasts, and High Forecasts, allowing you to observe trends in analysts' expectations and compare the performance of filtered stocks against the broader market. Use the forecast type selector to focus on a specific forecast scenario.
-""")
-
 
 st.plotly_chart(fig)
 
@@ -969,6 +988,8 @@ else:
 st.markdown("<hr>", unsafe_allow_html=True)
 
 
+
+
 # --- Dividend Yield Chart (using filtered_data) ---
 st.subheader("Dividend Yield of Stocks (Filtered by Sector)")
 
@@ -1031,12 +1052,64 @@ fig_div.update_yaxes(ticksuffix="%")
 # Display the chart
 st.plotly_chart(fig_div, use_container_width=True)
 
+st.markdown("<hr>", unsafe_allow_html=True)
+
+
+
+# --- Market cap chart ---
+# st.subheader("Total Market Cap (S&P 500)")
+
+# Copy data from filtered_data to avoid modifying it elsewhere
+df_pie = filtered_data.copy()
+
+# Ensure the 'Market cap clear' column is numeric
+df_pie["Market cap clear"] = pd.to_numeric(df_pie["Market cap clear"], errors="coerce")
+
+# Group data by sector and calculate the total market cap and company count
+df_pie_agg = (
+    df_pie.groupby("Sector", dropna=True)
+          .agg({
+              "Stock": "count",
+              "Market cap clear": "sum"
+          })
+          .reset_index()
+          .rename(columns={"Stock": "CompanyCount", "Market cap clear": "TotalMarketCap"})
+)
+
+# Calculate the total market cap (across sectors) in billions of USD
+total_sp500_marketcap = df_pie_agg["TotalMarketCap"].sum()
+total_sp500_in_billion = total_sp500_marketcap / 1e9
+
+# Display a full-width metric
+st.metric(
+    label="Total Market Cap (S&P 500)",
+    value=f"{total_sp500_in_billion:,.2f} B USD"
+)
+
+
+# --- Chart 1: Market cap share by sector ---
+fig_cap = px.pie(
+    df_pie_agg,
+    names="Sector",
+    values="TotalMarketCap",
+    # title="Sector Share in Total Market Cap",
+    hover_data=["CompanyCount"],
+    labels={"CompanyCount": "Number of companies", "TotalMarketCap": "Market Cap"}  # <-- here we change the label
+)
+
+fig_cap.update_layout(
+    width=650,   # chart width in pixels
+    height=650,  # chart height in pixels
+    showlegend=False
+)
+st.plotly_chart(fig_cap)
+
+st.markdown("<hr>", unsafe_allow_html=True)
 
 st.markdown("""\
 Please note: Investing involves risk and you may lose some or all of your capital.
 This site is provided for informational purposes only and does not constitute financial advice.
 """)
-st.markdown("<hr>", unsafe_allow_html=True)
 
 st.markdown("""
     <p style="font-size: 12px; text-align: left; color: gray;">
