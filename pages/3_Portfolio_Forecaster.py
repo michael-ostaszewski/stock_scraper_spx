@@ -111,8 +111,29 @@ st.markdown("<hr>", unsafe_allow_html=True)
 # ======================================================================
 # 5. CSV instructions + example file
 # ======================================================================
-example_csv_path = "/Users/michal/PycharmProjects/Stock Scraper/Example csv file portfolio forecaster/xtb stock list.csv"
-example_df = pd.read_csv(example_csv_path, delimiter=';')
+# example_csv_path = "/Users/michal/PycharmProjects/Stock Scraper/Example csv file portfolio forecaster/xtb stock list.csv"
+# example_df = pd.read_csv(example_csv_path, delimiter=';')
+
+@st.cache_data
+def load_example_portfolio():
+    url = (
+        "https://raw.githubusercontent.com/michael-ostaszewski/stock_scraper_spx/refs/heads/main/Example%20csv%20file%20portfolio%20forecaster/xtb%20stock%20list.csv"
+    )
+    return pd.read_csv(url, delimiter=';')
+
+try:
+    example_df = load_example_portfolio()
+except Exception as e:
+    # awaryjny mini‑przykład, żeby aplikacja nigdy nie padła
+    example_df = pd.DataFrame({
+        "Symbol": ["AAPL", "MSFT"],
+        "Type":   ["BUY", "BUY"],
+        "Volume": [1, 2],
+        "Open time": ["" , ""],
+        "Open price": [0, 0],
+    })
+
+
 html_table = example_df.head(3).to_html(index=False, border=0)
 csv_data = example_df.to_csv(index=False, sep=';')
 csv_data_encoded = urllib.parse.quote(csv_data)
@@ -176,9 +197,9 @@ custom_html = f"""
     <div class="custom-table">
         {html_table}
     </div>
-    <a class="download-link" href="data:text/csv;charset=utf-8,{csv_data_encoded}" download="xtb_stock_list.csv">
-        Download sample CSV file here
-    </a>
+    <a class="download-link" href="https://raw.githubusercontent.com/michael-ostaszewski/stock_scraper_spx/refs/heads/main/Example%20csv%20file%20portfolio%20forecaster/xtb%20stock%20list.csv">
+    Download sample CSV file here
+</a>
 </details>
 """
 
