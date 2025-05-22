@@ -82,7 +82,8 @@ required_columns = [
 
 if all(col in filtered_data.columns for col in required_columns):
     # We create a selectbox for sectors
-    sectors = sorted(filtered_data["Sector"].unique())
+    sectors = sorted(filtered_data["Sector"].dropna().unique()) #usuwam brakujące waertości przed sortowaniem
+    # sectors = sorted(filtered_data["Sector"].unique())
     sector_options = ["All Sectors"] + sectors
     selected_sector = st.sidebar.selectbox("Select Sector",
                                            options=sector_options,
@@ -99,7 +100,7 @@ if all(col in filtered_data.columns for col in required_columns):
     # Filter data according to certain criteria
     scoring = filtered_data[required_columns].sort_values("Score", ascending=False, ignore_index=True)
     scoring = scoring[
-        (scoring["Smart Score"] > 7) &
+        (scoring["Smart Score"] > 8) &
         (scoring["Score"] > 2) &
         (scoring["Low Forecast Percent"] > -5) &
         (scoring["Score"] < 6)
