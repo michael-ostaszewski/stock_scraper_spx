@@ -435,6 +435,268 @@ if company_details is not None and not company_details.empty:
 else:
     st.info("Please enter a valid ticker symbol to explore custom metrics.")
 
+st.markdown("<hr>", unsafe_allow_html=True)
+#
+# # -------------------------------------------------
+# # Turtle Strategy – Donchian Channels & Signals
+# # -------------------------------------------------
+#
+# st.header("Turtle Strategy Signals")
+# st.markdown("""
+# This chart applies the classic **Turtle Trading** rules to the selected ticker.
+#
+# * **Upper Donchian Channel** – highest high of the past **20** sessions
+# * **Lower Donchian Channel** – lowest low of the past **10** sessions
+#
+# A **Buy** signal appears when today’s close breaks above yesterday’s 20-day high.
+# A **Sell** signal appears when today’s close falls below yesterday’s 10-day low.
+# """)
+#
+# if company_details is not None and not company_details.empty:
+#
+#     # ───── 1. Parse 1-day range into Low / High ──────────────────────────
+#     def split_range(r):
+#         """Return low, high from 'low high' or 'low\\nhigh' strings."""
+#         if pd.isna(r):
+#             return [None, None]
+#         parts = str(r).replace("\n", " ").split()
+#         if len(parts) != 2:
+#             return [None, None]
+#         low, high = map(float, parts)
+#         return [min(low, high), max(low, high)]
+#
+#     lows_highs = company_details["1-day range"].apply(split_range).tolist()
+#     company_details[["Low", "High"]] = pd.DataFrame(lows_highs, index=company_details.index)
+#
+#     # Drop rows where parsing failed
+#     company_details = company_details.dropna(subset=["Low", "High", "Price"])
+#
+#     # ───── 2. Compute Donchian channels ─────────────────────────────────
+#     company_details = company_details.sort_values("Date of record")
+#
+#     company_details["High20"] = (
+#         company_details["High"].rolling(window=20, min_periods=20).max()
+#     )
+#     company_details["Low10"] = (
+#         company_details["Low"].rolling(window=10, min_periods=10).min()
+#     )
+#
+#     # ───── 3. Generate Turtle entry / exit signals ──────────────────────
+#     price      = company_details["Price"]
+#     high20_y   = company_details["High20"].shift(1)   # yesterday’s band
+#     low10_y    = company_details["Low10"].shift(1)
+#
+#     company_details["BuySignal"]  = (price > high20_y) & (price.shift(1) <= high20_y)
+#     company_details["SellSignal"] = (price < low10_y) & (price.shift(1) >= low10_y)
+#
+#     # ───── 4. Build the plot ────────────────────────────────────────────
+#     fig_turtle = go.Figure()
+#
+#     # Closing price
+#     fig_turtle.add_trace(go.Scatter(
+#         x=company_details["Date of record"],
+#         y=price,
+#         mode="lines",
+#         name="Close",
+#         line=dict(color="black")
+#     ))
+#
+#     # Donchian channels
+#     fig_turtle.add_trace(go.Scatter(
+#         x=company_details["Date of record"],
+#         y=company_details["High20"],
+#         mode="lines",
+#         name="20-Day High",
+#         line=dict(color="royalblue", dash="dot")
+#     ))
+#     fig_turtle.add_trace(go.Scatter(
+#         x=company_details["Date of record"],
+#         y=company_details["Low10"],
+#         mode="lines",
+#         name="10-Day Low",
+#         line=dict(color="orange", dash="dot")
+#     ))
+#
+#     # Buy markers (green triangles up)
+#     buys = company_details[company_details["BuySignal"]]
+#     fig_turtle.add_trace(go.Scatter(
+#         x=buys["Date of record"],
+#         y=buys["Price"],
+#         mode="markers",
+#         name="BUY",
+#         marker=dict(symbol="triangle-up", size=12, color="green")
+#     ))
+#
+#     # Sell markers (red triangles down)
+#     sells = company_details[company_details["SellSignal"]]
+#     fig_turtle.add_trace(go.Scatter(
+#         x=sells["Date of record"],
+#         y=sells["Price"],
+#         mode="markers",
+#         name="SELL",
+#         marker=dict(symbol="triangle-down", size=12, color="red")
+#     ))
+#
+#     fig_turtle.update_layout(
+#         xaxis_title="Date",
+#         yaxis_title="Price (USD)",
+#         legend=dict(orientation="h", yanchor="bottom",
+#                     y=1.02, xanchor="right", x=1),
+#         height=500
+#     )
+#
+#     st.plotly_chart(fig_turtle, use_container_width=True)
+#
+# else:
+#     st.info("Please enter a valid ticker symbol to compute Turtle signals.")
+
+
+# -------------------------------------------------
+# Turtle Strategy – Donchian Channels, Candles & Signals
+# -------------------------------------------------
+
+st.header("Turtle Strategy Signals")
+st.markdown("""
+This chart applies the classic **Turtle Trading** rules to the selected ticker.
+
+* **Upper Donchian Channel** – highest high of the past **20** sessions  
+* **Lower Donchian Channel** – lowest low of the past **10** sessions  
+
+A **Buy** signal triggers when today’s close breaks **above** yesterday’s 20-day high.  
+A **Sell** signal triggers when today’s close breaks **below** yesterday’s 10-day low.
+""")
+
+if company_details is not None and not company_details.empty:
+
+    # ───── 1. Parse 1-day range into Low / High ──────────────────────────
+    def split_range(r):
+        """Return low, high from 'low high' or 'low\\nhigh' strings."""
+        if pd.isna(r):
+            return [None, None]
+        parts = str(r).replace("\n", " ").split()
+        if len(parts) != 2:
+            return [None, None]
+        low, high = map(float, parts)
+        return [min(low, high), max(low, high)]
+
+    lows_highs = company_details["1-day range"].apply(split_range).tolist()
+    company_details[["Low", "High"]] = pd.DataFrame(lows_highs, index=company_details.index)
+
+    # Keep rows where parsing succeeded and price is present
+    company_details = company_details.dropna(subset=["Low", "High", "Price"])
+
+    # ───── 2. Build OHLC columns ─────────────────────────────────────────
+    company_details = company_details.sort_values("Date of record")
+
+    # Open ≈ previous close.  Replace with true 'Open' if you have it.
+    company_details["Open"] = company_details["Price"].shift(1)
+    company_details["Open"].iloc[0] = company_details["Price"].iloc[0]
+
+    # ───── 3. Donchian channels ─────────────────────────────────────────
+    company_details["High20"] = (
+        company_details["High"].rolling(window=20, min_periods=20).max()
+    )
+    company_details["Low10"] = (
+        company_details["Low"].rolling(window=10, min_periods=10).min()
+    )
+
+    # ───── 4. Turtle entry / exit signals ───────────────────────────────
+    price      = company_details["Price"]
+    high20_y   = company_details["High20"].shift(1)   # yesterday’s band
+    low10_y    = company_details["Low10"].shift(1)
+
+    company_details["BuySignal"]  = (price > high20_y) & (price.shift(1) <= high20_y)
+    company_details["SellSignal"] = (price < low10_y) & (price.shift(1) >= low10_y)
+
+    # ───── 5. Plot: candles + channels + markers ────────────────────────
+    fig_turtle = go.Figure()
+
+    # Candlesticks
+    fig_turtle.add_trace(go.Candlestick(
+        x     = company_details["Date of record"],
+        open  = company_details["Open"],
+        high  = company_details["High"],
+        low   = company_details["Low"],
+        close = company_details["Price"],
+        name  = "Price",
+        increasing_line_color="green",
+        decreasing_line_color="red",
+        showlegend=False
+    ))
+
+    # Donchian channels
+    fig_turtle.add_trace(go.Scatter(
+        x=company_details["Date of record"],
+        y=company_details["High20"],
+        mode="lines",
+        name="20-Day High",
+        line=dict(color="royalblue", dash="dot")
+    ))
+    fig_turtle.add_trace(go.Scatter(
+        x=company_details["Date of record"],
+        y=company_details["Low10"],
+        mode="lines",
+        name="10-Day Low",
+        line=dict(color="orange", dash="dot")
+    ))
+
+    # Buy markers (green triangles up)
+    buys = company_details[company_details["BuySignal"]]
+    fig_turtle.add_trace(go.Scatter(
+        x=buys["Date of record"],
+        y=buys["Price"],
+        mode="markers",
+        name="BUY",
+        marker=dict(symbol="triangle-up", size=12, color="green")
+    ))
+
+    # Sell markers (red triangles down)
+    sells = company_details[company_details["SellSignal"]]
+    fig_turtle.add_trace(go.Scatter(
+        x=sells["Date of record"],
+        y=sells["Price"],
+        mode="markers",
+        name="SELL",
+        marker=dict(symbol="triangle-down", size=12, color="red")
+    ))
+
+    fig_turtle.update_layout(
+        xaxis_title="Date",
+        yaxis_title="Price (USD)",
+        legend=dict(orientation="h", yanchor="bottom",
+                    y=1.02, xanchor="right", x=1),
+        height=550
+    )
+
+    st.plotly_chart(fig_turtle, use_container_width=True)
+
+    # ───── 6. Signals table (read-only helper) ─────────────────────────────
+    st.subheader("Turtle Signals Log")
+
+    # Gather BUY and SELL rows, tag them, and tidy up the columns
+    df_signals = (
+        pd.concat(
+            [
+                buys.assign(Signal="BUY"),
+                sells.assign(Signal="SELL")
+            ]
+        )
+        .loc[:, ["Date of record", "Signal", "Price"]]
+        .sort_values("Date of record")
+        .reset_index(drop=True)
+        .rename(columns={"Date of record": "Date", "Price": "Close"})
+    )
+
+    # Optional: prettify price column
+    df_signals["Close"] = df_signals["Close"].map("${:,.2f}".format)
+
+    # Display as an interactive table
+    st.dataframe(df_signals, use_container_width=True)
+
+else:
+    st.info("Please enter a valid ticker symbol to compute Turtle signals.")
+
+
 
 
 st.markdown("<hr>", unsafe_allow_html=True)
