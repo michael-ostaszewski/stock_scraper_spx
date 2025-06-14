@@ -331,6 +331,114 @@ else:
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
+# -------------------------------------------------
+# Smart Score – historical trend
+# -------------------------------------------------
+
+st.header("Smart Score Trend Over Time")
+st.markdown("""
+The **Smart Score** (scale **1 – 10**) is a composite rating that blends eight
+fundamental and market-based factors into a single number. The line chart below shows how the score has evolved for the
+selected ticker across all dates available in the database.
+""")
+
+if company_details is not None and not company_details.empty:
+    if "Smart Score" in company_details.columns:
+        # Sort by date so the line proceeds chronologically
+        df_score = company_details.sort_values("Date of record")
+
+        # ───── summary metrics side-by-side ────────────────────────────────
+        num_sessions = len(df_score)
+        avg_smartscore = df_score["Smart Score"].mean()
+
+        col1, col2 = st.columns(2)
+        col1.metric("Trading sessions in data set", f"{num_sessions}")
+        col2.metric("Average Smart Score", f"{avg_smartscore:.2f}")
+
+        #───── summary metrics side-by-side ────────────────────────────────
+
+        fig_score = go.Figure()
+        fig_score.add_trace(
+            go.Scatter(
+                x=df_score["Date of record"],
+                y=df_score["Smart Score"],
+                mode="lines+markers",
+                name="Smart Score"
+            )
+        )
+        fig_score.update_layout(
+            xaxis_title="Date",
+            yaxis_title="Smart Score (1–10)",
+            yaxis=dict(range=[0, 10], dtick=1)
+        )
+        st.plotly_chart(fig_score, use_container_width=True)
+    else:
+        st.info("Smart Score data not available for this company.")
+else:
+    st.info("Please enter a valid ticker symbol to view Smart Score trends.")
+
+
+
+st.markdown("<hr>", unsafe_allow_html=True)
+
+
+# -------------------------------------------------
+# Custom Metric Explorer
+# -------------------------------------------------
+
+st.header("Custom Metric Explorer")
+st.markdown("""
+Pick any numeric columns to plot their historical trend. P/E ratio is selected by default.""")
+
+if company_details is not None and not company_details.empty:
+
+    # Identify numeric columns in the DataFrame
+    numeric_cols = [
+        c for c in company_details.columns
+        if pd.api.types.is_numeric_dtype(company_details[c])
+    ]
+
+    # Default to P/E ratio if it exists, otherwise start empty
+    default_metrics = ["P/E ratio"] if "P/E ratio" in numeric_cols else []
+
+    selected_metrics = st.multiselect(
+        "Select metrics to display:",
+        options=sorted(numeric_cols),
+        default=default_metrics
+    )
+
+    if selected_metrics:
+        df_plot = company_details.sort_values("Date of record")
+
+        fig_custom = go.Figure()
+
+        # Add a line for each selected metric
+        for metric in selected_metrics:
+            fig_custom.add_trace(go.Scatter(
+                x=df_plot["Date of record"],
+                y=df_plot[metric],
+                mode="lines+markers",
+                name=metric
+            ))
+
+        fig_custom.update_layout(
+            xaxis_title="Date",
+            yaxis_title="Metric value",
+            legend=dict(orientation="h", yanchor="bottom",
+                        y=1.02, xanchor="right", x=1),
+            height=400
+        )
+
+        st.plotly_chart(fig_custom, use_container_width=True)
+    else:
+        st.info("Choose at least one metric to draw the chart.")
+else:
+    st.info("Please enter a valid ticker symbol to explore custom metrics.")
+
+
+
+st.markdown("<hr>", unsafe_allow_html=True)
+
 st.markdown("""\
 Please note: Investing involves risk and you may lose some or all of your capital. 
 This site is provided for informational purposes only and does not constitute financial advice.
