@@ -4,6 +4,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import time
 from openai import OpenAI
+import re
+import numpy as np
 
 ######### początek kodu CSS - tu jest kod CSS do stylizowania strony - początek ########
 st.markdown(
@@ -77,7 +79,7 @@ else:
 # Required columns for further analysis
 required_columns = [
     "Stock", "Sector", "Price", "Low Forecast Percent", "Median Forecast Percent",
-    "High Forecast Percent", "Smart Score", "Score", "P/E ratio"
+    "High Forecast Percent", "Smart Score", "Score", "P/E ratio", "Number of analysts"
 ]
 
 if all(col in filtered_data.columns for col in required_columns):
@@ -103,7 +105,8 @@ if all(col in filtered_data.columns for col in required_columns):
         (scoring["Smart Score"] > 8) &
         (scoring["Score"] > 2) &
         (scoring["Low Forecast Percent"] > -5) &
-        (scoring["Score"] < 6)
+        (scoring["Score"] < 6) &
+        (scoring["Number of analysts"] > 19)
         ]
 
     if selected_sector != "All Sectors":
@@ -879,7 +882,7 @@ fig_bar2 = px.bar(
     x="Stock",
     y="Number of analysts",
     color="Sector",
-    title="From entire S&P500 Index",
+    # title="From entire S&P500 Index",
     category_orders=category_order
 )
 
@@ -908,6 +911,41 @@ st.plotly_chart(fig_bar2)
 st.markdown("<hr>", unsafe_allow_html=True)
 # st.write("")
 
+
+# -------------------------------------------------
+# Analyst-Coverage Distribution (selected date)
+# -------------------------------------------------
+
+st.subheader("Distribution of Analyst Coverage (Selected Date)")
+
+if filtered_data.empty or "Number of analysts" not in filtered_data.columns:
+    st.info("No analyst-coverage data available for the selected date.")
+else:
+    analysts_num = (
+        pd.to_numeric(filtered_data["Number of analysts"], errors="coerce")
+        .dropna()
+    )
+
+    if analysts_num.empty:
+        st.info("All rows for the selected date have missing analyst counts.")
+    else:
+        fig_analyst_hist = px.histogram(
+            analysts_num,
+            nbins=80,                                # adjust if you prefer finer / coarser bins
+            labels={"value": "Number of Analysts", "count": "Number of Stocks"},
+            # title="Histogram of Analyst Coverage (Selected Date)",
+        )
+
+        fig_analyst_hist.update_layout(
+            xaxis_title="Number of Analysts covering stock",
+            yaxis_title="Number of Stocks",
+            bargap=0.05
+        )
+
+        st.plotly_chart(fig_analyst_hist, use_container_width=True)
+
+
+st.markdown("<hr>", unsafe_allow_html=True)
 
 
 
@@ -1104,6 +1142,414 @@ fig_cap.update_layout(
     showlegend=False
 )
 st.plotly_chart(fig_cap)
+
+st.markdown("<hr>", unsafe_allow_html=True)
+
+
+# -------------------------------------------------
+# Average Smart Score – metric & trend line
+# -------------------------------------------------
+
+st.header("Average Smart Score (All S&P 500 Stocks)")
+
+# ── 1 ▸ TODAY’S AVERAGE SMART SCORE ─────────────────────────────────────
+if filtered_data.empty or "Smart Score" not in filtered_data.columns:
+    st.info("No Smart Score data available for the selected date.")
+else:
+    # Ensure numeric dtype
+    filtered_data["Smart Score"] = pd.to_numeric(
+        filtered_data["Smart Score"], errors="coerce"
+    )
+
+    avg_today = filtered_data["Smart Score"].mean()
+
+    # Delta vs. previous trading day (optional)
+    delta_avg = None
+    if prev_date is not None:
+        prev_day_data = df[df["Date of record"] == prev_date]
+        prev_avg = pd.to_numeric(
+            prev_day_data["Smart Score"], errors="coerce"
+        ).mean()
+        if pd.notna(prev_avg):
+            delta_avg = avg_today - prev_avg
+
+    # Metric card (single column so it spans the page width nicely)
+    st.metric(
+        label="Average Smart Score (today)",
+        value=f"{avg_today:.2f}",
+        delta=f"{delta_avg:+.2f}" if delta_avg is not None else "N/A",
+        help="Simple arithmetic mean of Smart Scores for all stocks on the selected date."
+    )
+
+# ── 2 ▸ TREND LINE OVER TIME ────────────────────────────────────────────
+# Calculate daily mean across the entire dataset
+if "Smart Score" in df.columns and "Date of record" in df.columns:
+    df_smart_trend = (
+        df.dropna(subset=["Date of record"])
+          .assign(**{"Smart Score": pd.to_numeric(df["Smart Score"], errors="coerce")})
+          .groupby("Date of record")["Smart Score"]
+          .mean()
+          .reset_index()
+    )
+
+    fig_smart_trend = px.line(
+        df_smart_trend.round(2),
+        x="Date of record",
+        y="Smart Score",
+        # title="Average Smart Score Over Time (All S&P 500 Stocks)",
+        markers=True,
+        labels={"Smart Score": "Average Smart Score"}
+    )
+
+    fig_smart_trend.update_layout(
+        xaxis_title="Date",
+        yaxis_title="Average Smart Score (1 – 10)",
+        yaxis=dict(range=[0, 10], dtick=1)
+    )
+
+    st.plotly_chart(fig_smart_trend, use_container_width=True)
+else:
+    st.info("Smart Score or date column missing – cannot draw historical trend.")
+
+st.markdown("<hr>", unsafe_allow_html=True)
+
+
+# -------------------------------------------------
+# Smart Score distribution (histogram) – selected date
+# -------------------------------------------------
+
+st.subheader("Smart Score Distribution (Selected Date)")
+
+if filtered_data.empty or "Smart Score" not in filtered_data.columns:
+    st.info("No Smart Score data available for the selected date.")
+else:
+    # ── 1 ▸ przygotuj dane ──────────────────────────────────────────────
+    scores_int = (
+        pd.to_numeric(filtered_data["Smart Score"], errors="coerce")
+        .dropna()
+        .round(0)
+        .astype(int)
+    )
+
+    counts = (
+        scores_int.value_counts()
+                  .reindex(range(1, 11), fill_value=0)   # wymuś brakujące koszyki
+                  .sort_index()
+    )
+
+    df_hist = counts.reset_index()
+    df_hist.columns = ["Smart Score", "Count"]           # ← kluczowa poprawka
+
+    # ── 2 ▸ wykres ──────────────────────────────────────────────────────
+    fig_hist = px.bar(
+        df_hist,
+        x="Smart Score",
+        y="Count",
+        # title="Distribution of Smart Scores (Selected Date)",
+        labels={"Count": "Number of Stocks"},
+        category_orders={"Smart Score": list(range(1, 11))},
+        text="Count"
+    )
+
+    fig_hist.update_traces(texttemplate="%{text}", textposition="outside")
+    fig_hist.update_layout(
+        xaxis_title="Smart Score (1 – 10)",
+        yaxis_title="Number of Stocks",
+        uniformtext_minsize=8,
+        uniformtext_mode="hide"
+    )
+
+    st.plotly_chart(fig_hist, use_container_width=True)
+
+st.markdown("<hr>", unsafe_allow_html=True)
+
+
+# -------------------------------------------------
+# Stocks by Smart Score (picker)
+# -------------------------------------------------
+
+st.subheader("Stocks with Selected Smart Score")
+
+needed_cols = [
+    "Smart Score", "Sector", "Stock",
+    "Number of analysts",
+    "Low Forecast Percent", "Median Forecast Percent", "High Forecast Percent"
+]
+
+if filtered_data.empty or not all(c in filtered_data.columns for c in needed_cols):
+    st.info("Required columns are missing or no data for the selected date.")
+else:
+    # Ensure numeric types
+    filtered_data["Smart Score"]          = pd.to_numeric(filtered_data["Smart Score"], errors="coerce")
+    filtered_data["Number of analysts"]   = pd.to_numeric(filtered_data["Number of analysts"], errors="coerce")
+    for col in ["Low Forecast Percent", "Median Forecast Percent", "High Forecast Percent"]:
+        filtered_data[col] = pd.to_numeric(filtered_data[col], errors="coerce")
+
+    # # Integer bucket 1-10
+    # filtered_data["SmartScoreInt"] = filtered_data["Smart Score"].round().astype(int)
+
+    # --- na to:
+    scores_clean = (
+        pd.to_numeric(filtered_data["Smart Score"], errors="coerce")  # NaN dla nieparsowalnych
+        .replace([np.inf, -np.inf], np.nan)  # usuń ±Inf
+    )
+
+    filtered_data["SmartScoreInt"] = scores_clean.round().astype("Int64")  # 'Int64' toleruje NA
+
+    # Multiselect - default 10
+    score_choice = st.multiselect(
+        "Choose Smart Score value(s):",
+        options=list(range(1, 11)),
+        default=[10]
+    )
+
+    subset = filtered_data[filtered_data["SmartScoreInt"].isin(score_choice)]
+
+    if subset.empty:
+        st.warning("No stocks match the selected Smart Score value(s).")
+    else:
+        out_cols = [
+            "Stock", "Sector", "SmartScoreInt",
+            "Number of analysts",
+            "Low Forecast Percent", "Median Forecast Percent", "High Forecast Percent"
+        ]
+        out = (
+            subset[out_cols]
+            .rename(columns={"SmartScoreInt": "Smart Score"})
+            .sort_values(["Smart Score", "Stock"], ascending=[False, True])
+            .reset_index(drop=True)
+            .round(2)
+        )
+        st.dataframe(out, use_container_width=True)
+
+
+st.markdown("<hr>", unsafe_allow_html=True)
+
+
+
+
+# # -------------------------------------------------
+# # Donchian-Turtle Signals ─ All Stocks, Selected Date   -  all signals
+# # -------------------------------------------------
+#
+# st.header("Turtle Strategy Signals – Entire S&P 500 (Selected Date)")
+#
+# if "1-day range" not in df.columns or filtered_data.empty:
+#     st.info("Cannot compute signals – missing price-range data or no rows for the selected date.")
+# else:
+#
+#     # ── 1 ▸ helper: split 'low high' text into floats ───────────────────
+#     def split_range(r: str):
+#         """
+#         Convert 'low high' (or with newline) to two floats [low, high].
+#         Handles thousands separators like '7,866.87'.
+#         """
+#         if pd.isna(r):
+#             return [None, None]
+#         parts = str(r).replace("\n", " ").strip().split()
+#         if len(parts) != 2:
+#             return [None, None]
+#
+#         nums = []
+#         for p in parts:
+#             num_str = re.sub(r"[^\d\.\-]", "", p)  # drop commas, $, etc.
+#             try:
+#                 nums.append(float(num_str))
+#             except ValueError:
+#                 return [None, None]
+#
+#         low, high = nums
+#         return [min(low, high), max(low, high)]
+#
+#     # ── 2 ▸ working copy with Low / High columns ────────────────────────
+#     df_all = df.copy()
+#
+#     df_all[["Low", "High"]] = (
+#         df_all["1-day range"].apply(split_range).apply(pd.Series)
+#     )
+#
+#     df_all = df_all.dropna(subset=["Low", "High", "Price", "Date of record"])
+#
+#     # ── 3 ▸ rolling Donchian channels per ticker ────────────────────────
+#     df_all["Date of record"] = pd.to_datetime(df_all["Date of record"])
+#     df_all = df_all.sort_values(["Stock", "Date of record"])
+#
+#     df_all["High20"] = (
+#         df_all.groupby("Stock")["High"]
+#               .transform(lambda s: s.rolling(20, min_periods=20).max())
+#     )
+#     df_all["Low10"] = (
+#         df_all.groupby("Stock")["Low"]
+#               .transform(lambda s: s.rolling(10, min_periods=10).min())
+#     )
+#
+#     df_all["High20_y"] = df_all.groupby("Stock")["High20"].shift(1)
+#     df_all["Low10_y"]  = df_all.groupby("Stock")["Low10"].shift(1)
+#     df_all["Close_y"]  = df_all.groupby("Stock")["Price"].shift(1)
+#
+#     # ── 4 ▸ BUY / SELL masks ───────────────────────────────────────────
+#     df_all["Buy"]  = (df_all["Price"] > df_all["High20_y"]) & (df_all["Close_y"] <= df_all["High20_y"])
+#     df_all["Sell"] = (df_all["Price"] < df_all["Low10_y"])  & (df_all["Close_y"] >= df_all["Low10_y"])
+#
+#     # ── 5 ▸ keep only rows for selected date ───────────────────────────
+#     today = pd.Timestamp(selected_date)
+#     today_df = df_all[df_all["Date of record"] == today]
+#
+#     buy_df  = today_df[today_df["Buy"] ].copy()
+#     sell_df = today_df[today_df["Sell"]].copy()
+#
+#     # ── 6 ▸ headline metrics ───────────────────────────────────────────
+#     col_b, col_s = st.columns(2)
+#     col_b.metric("BUY signals today",  len(buy_df))
+#     col_s.metric("SELL signals today", len(sell_df))
+#
+#     # ── 7 ▸ helper to show tables ──────────────────────────────────────
+#     def show_table(df_sig, sig_type: str):
+#         if df_sig.empty:
+#             st.info(f"No {sig_type} signals for the selected date.")
+#             return
+#
+#         use_cols = ["Stock", "Sector", "Price",
+#                     "High20_y" if sig_type == "BUY" else "Low10_y"]
+#         renamed = {
+#             "Price": "Close",
+#             "High20_y": "Y-day 20-day High",
+#             "Low10_y": "Y-day 10-day Low"
+#         }
+#
+#         out = (df_sig[use_cols]
+#                .rename(columns=renamed)
+#                .sort_values("Stock")
+#                .round(2)
+#                .reset_index(drop=True))
+#
+#         st.subheader(f"{sig_type} signals")
+#         st.dataframe(out, use_container_width=True)
+#
+#     show_table(buy_df,  "BUY")
+#     show_table(sell_df, "SELL")
+
+
+
+# -------------------------------------------------
+# Donchian-Turtle Signals ─ All Stocks, Selected Date
+# -------------------------------------------------
+
+st.header("Turtle Strategy Signals – Entire S&P 500 (Selected Date)")
+
+if "1-day range" not in df.columns or filtered_data.empty:
+    st.info("Cannot compute signals – missing price-range data or no rows for the selected date.")
+else:
+
+    # ── 1 ▸ helper – parse 'low high' text into floats ──────────────────
+    def split_range(r: str):
+        if pd.isna(r):
+            return [None, None]
+        parts = str(r).replace("\n", " ").strip().split()
+        if len(parts) != 2:
+            return [None, None]
+        nums = []
+        for p in parts:
+            p_clean = re.sub(r"[^\d\.\-]", "", p)   # drop commas, $, etc.
+            try:
+                nums.append(float(p_clean))
+            except ValueError:
+                return [None, None]
+        low, high = nums
+        return [min(low, high), max(low, high)]
+
+    # ── 2 ▸ working copy + Low/High columns ────────────────────────────
+    df_all = df.copy()
+    df_all[["Low", "High"]] = (
+        df_all["1-day range"].apply(split_range).apply(pd.Series)
+    )
+    df_all = df_all.dropna(subset=["Low", "High", "Price", "Date of record"])
+
+    df_all["Date of record"] = pd.to_datetime(df_all["Date of record"])
+    df_all = df_all.sort_values(["Stock", "Date of record"])
+
+    # ── 3 ▸ rolling Donchian channels per ticker ────────────────────────
+    df_all["High20"] = (
+        df_all.groupby("Stock")["High"]
+              .transform(lambda s: s.rolling(20, min_periods=20).max())
+    )
+    df_all["Low10"] = (
+        df_all.groupby("Stock")["Low"]
+              .transform(lambda s: s.rolling(10, min_periods=10).min())
+    )
+
+    df_all["High20_y"] = df_all.groupby("Stock")["High20"].shift(1)
+    df_all["Low10_y"]  = df_all.groupby("Stock")["Low10"].shift(1)
+    df_all["Close_y"]  = df_all.groupby("Stock")["Price"].shift(1)
+
+    # ── 4 ▸ RAW BUY / SELL flags ───────────────────────────────────────
+    df_all["RawSignal"] = np.select(
+        [
+            (df_all["Price"] > df_all["High20_y"]) & (df_all["Close_y"] <= df_all["High20_y"]),
+            (df_all["Price"] < df_all["Low10_y"])  & (df_all["Close_y"] >= df_all["Low10_y"]),
+        ],
+        ["BUY", "SELL"],
+        default=None
+    )
+
+    # ── 5 ▸ Filtered swing signals  (first BUY / first SELL) ────────────
+    def swing_filter(series):
+        out, state = [], "FLAT"
+        for sig in series:
+            if sig == "BUY" and state != "LONG":
+                out.append("BUY");  state = "LONG"
+            elif sig == "SELL" and state == "LONG":
+                out.append("SELL"); state = "FLAT"
+            else:
+                out.append(None)
+        return out
+
+    df_all["FiltSignal"] = (
+        df_all.groupby("Stock")["RawSignal"].transform(swing_filter)
+    )
+
+    # ── 6 ▸ user selector (default = Filtered) ──────────────────────────
+    mode = st.selectbox(
+        "Signal view:",
+        ("Filtered signals (default)", "All signals"),
+        index=0
+    )
+    sig_col = "FiltSignal" if "Filtered" in mode else "RawSignal"
+
+    # ── 7 ▸ keep only selected-date rows with a signal ──────────────────
+    today = pd.Timestamp(selected_date)
+    today_df = df_all[(df_all["Date of record"] == today) & df_all[sig_col].notna()]
+
+    buy_df  = today_df[today_df[sig_col] == "BUY"].copy()
+    sell_df = today_df[today_df[sig_col] == "SELL"].copy()
+
+    # ── 8 ▸ headline counters ───────────────────────────────────────────
+    col_b, col_s = st.columns(2)
+    col_b.metric("BUY signals today",  len(buy_df))
+    col_s.metric("SELL signals today", len(sell_df))
+
+    # ── 9 ▸ helper to print tables ──────────────────────────────────────
+    def show_table(df_sig, sig_type):
+        if df_sig.empty:
+            st.info(f"No {sig_type} signals for the selected date.")
+            return
+        cols = ["Stock", "Sector", "Price",
+                "High20_y" if sig_type == "BUY" else "Low10_y"]
+        rename = {
+            "Price": "Close",
+            "High20_y": "Y-day 20-day High",
+            "Low10_y":  "Y-day 10-day Low"
+        }
+        out = (df_sig[cols]
+               .rename(columns=rename)
+               .sort_values("Stock")
+               .round(2)
+               .reset_index(drop=True))
+        st.subheader(f"{sig_type} signals")
+        st.dataframe(out, use_container_width=True)
+
+    show_table(buy_df,  "BUY")
+    show_table(sell_df, "SELL")
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
