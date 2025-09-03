@@ -5,6 +5,7 @@ import urllib.parse
 import datetime
 import plotly.express as px
 import yfinance as yf
+import numpy as np
 
 
 # ======================================================================
@@ -1355,6 +1356,225 @@ else:
                 # renderujemy
                 col.markdown(styled.to_html(), unsafe_allow_html=True)
 
+
+
+st.markdown("<hr>", unsafe_allow_html=True)
+
+
+# ============================
+#  CORRELATION MAP (from df_forecasts) — with ordering
+# ============================
+# st.markdown("---")
+st.header("Correlation map (portfolio)")
+
+# 0) Zbierz tickery z aktualnego portfolio (netto != 0)
+_port = st.session_state.get("user_portfolio_df", pd.DataFrame()).copy()
+if _port.empty:
+    st.info("Add some tickers to your portfolio first.")
+else:
+    _port["Symbol"] = _port["Symbol"].astype(str).str.upper()
+    _port["__signed"] = _port.apply(
+        lambda r: float(str(r["Volume"]).replace(",", ".") or 0.0) * (1 if str(r["Type"]).upper() == "BUY" else -1),
+        axis=1
+    )
+    net = (
+        _port.groupby("Symbol", as_index=False)["__signed"].sum()
+             .rename(columns={"__signed": "NetVolume"})
+    )
+    tickers = net.loc[net["NetVolume"].abs() > 0, "Symbol"].tolist()
+
+    if len(tickers) < 2:
+        st.info("Need at least two tickers with non-zero net volume.")
+    else:
+        # 1) UI
+        # c1, c2, c3, c4 = st.columns([1,1,1,1])
+        # with c1:
+        #     window_rows = c1.selectbox("Window (last N trading rows)", [60, 120, 250], index=1)
+        # with c2:
+        #     ret_kind = c2.selectbox("Returns", ["Percent (pct_change)", "Log (diff of log)"], index=0)
+        # with c3:
+        #     corr_kind = c3.selectbox("Correlation", ["Pearson", "Spearman", "Kendall", "Up/Down (sign Pearson)"], index=0)
+        #
+        # # Czy jest scipy? (opcjonalny tryb hierarchiczny)
+        # try:
+        #     import scipy.cluster.hierarchy as sch
+        #     have_scipy = True
+        # except Exception:
+        #     have_scipy = False
+        #
+        # order_options = ["Original", "Cluster similar (spectral)"]
+        # if have_scipy:
+        #     order_options.append("Cluster similar (hierarchical)")
+        #
+        # with c4:
+        #     order_mode = c4.selectbox("Order heatmap", order_options, index=1)
+
+        # 1) UI (2×2)
+        row1_col1, row1_col2 = st.columns(2)
+        with row1_col1:
+            window_rows = st.selectbox(
+                "Window (last N trading rows)",
+                [60, 120, 250],
+                index=1
+            )
+        with row1_col2:
+            ret_kind = st.selectbox(
+                "Returns",
+                ["Percent (pct_change)", "Log (diff of log)"],
+                index=0
+            )
+
+        # Czy jest scipy? (opcjonalny tryb hierarchiczny)
+        try:
+            import scipy.cluster.hierarchy as sch
+
+            have_scipy = True
+        except Exception:
+            have_scipy = False
+
+        order_options = ["Original", "Cluster similar (spectral)"]
+        if have_scipy:
+            order_options.append("Cluster similar (hierarchical)")
+
+        row2_col1, row2_col2 = st.columns(2)
+        with row2_col1:
+            corr_kind = st.selectbox(
+                "Correlation",
+                ["Pearson", "Spearman", "Kendall", "Up/Down (sign Pearson)"],
+                index=0
+            )
+        with row2_col2:
+            order_mode = st.selectbox(
+                "Order heatmap",
+                order_options,
+                index=1 if "Cluster similar (spectral)" in order_options else 0
+            )
+
+        # 2) Przygotuj ceny z df_forecasts
+        df_all = df_forecasts.copy()
+        df_all["Stock"] = df_all["Stock"].astype(str).str.upper()
+        df_all["Date of record"] = pd.to_datetime(df_all["Date of record"], errors="coerce")
+
+        # Price -> float (czyścimy)
+        price_str = (
+            df_all["Price"]
+              .astype(str)
+              .str.replace("\u00A0", " ", regex=False)
+              .str.replace(",", "", regex=False)
+              .str.replace(r"[^0-9.\-]", "", regex=True)
+        )
+        df_all["Price"] = pd.to_numeric(price_str, errors="coerce")
+        df_all = df_all.dropna(subset=["Date of record", "Price"])
+
+        # Ostatni rekord w danym dniu
+        sort_keys = ["Stock", "Date of record"]
+        if "Time of record" in df_all.columns:
+            df_all["Time of record"] = df_all["Time of record"].astype(str)
+            sort_keys.append("Time of record")
+        df_all = df_all.sort_values(sort_keys)
+        df_daily_last = df_all.groupby(["Date of record", "Stock"], as_index=False).last()
+
+        # Pivot
+        wide = (
+            df_daily_last
+            .pivot(index="Date of record", columns="Stock", values="Price")
+            .sort_index()
+        )
+
+        # Tylko tickery z portfela i wszystkie obecne w danych
+        present = [t for t in tickers if t in wide.columns]
+        if len(present) < 2:
+            st.warning("Not enough overlapping tickers found in your historical dataset.")
+        else:
+            wide = wide[present].ffill().dropna(how="any")
+            if len(wide) > window_rows:
+                wide = wide.iloc[-window_rows:]
+
+            if wide.shape[0] < 5:
+                st.warning("Not enough rows to compute stable correlations (need at least ~5).")
+            else:
+                # 3) Zwroty
+                if "Log" in ret_kind:
+                    rets = np.log(wide).diff().dropna(how="any")
+                else:
+                    rets = wide.pct_change().dropna(how="any")
+
+                # 4) Korelacja
+                if corr_kind == "Pearson":
+                    C = rets.corr(method="pearson")
+                elif corr_kind == "Spearman":
+                    C = rets.corr(method="spearman")
+                elif corr_kind == "Kendall":
+                    C = rets.corr(method="kendall")
+                else:
+                    S = np.sign(rets.replace([np.inf, -np.inf], np.nan)).fillna(0.0)
+                    C = S.corr(method="pearson")
+
+                # 5) PORZĄDKOWANIE (klastrowanie podobnych)
+                labels = C.columns.tolist()
+
+                def spectral_order(corr_df: pd.DataFrame) -> list[str]:
+                    """Prosty porządek „klastrowy” bez zależności: sortujemy po wektorze własnym
+                    z największą wartością własną macierzy korelacji."""
+                    M = corr_df.fillna(0).values
+                    M = (M + M.T) / 2.0  # symetryzacja na wszelki
+                    # minimalna regularyzacja, żeby uniknąć degeneracji
+                    w, v = np.linalg.eigh(M + 1e-8 * np.eye(M.shape[0]))
+                    vec = v[:, -1]  # eigenvector dla największej wartości własnej
+                    idx = np.argsort(vec)  # lub np.argsort(-vec); kierunek nieistotny
+                    return [corr_df.index[i] for i in idx]
+
+                if order_mode == "Cluster similar (spectral)":
+                    labels = spectral_order(C)
+                    C = C.loc[labels, labels]
+                elif order_mode == "Cluster similar (hierarchical)" and have_scipy:
+                    # dystans = 1 - korelacja (obcinamy do [0,2])
+                    D = 1 - C.fillna(0).values
+                    D = np.clip(D, 0, 2)
+                    # linkage na spłaszczonej macierzy odległości
+                    Z = sch.linkage(sch.distance.squareform(D, checks=False), method="average")
+                    leaf_order = sch.leaves_list(Z)
+                    labels = [C.index[i] for i in leaf_order]
+                    C = C.loc[labels, labels]
+                # „Original” – zostawiamy bez zmian
+
+                # 6) Heatmapa
+                st.subheader("Correlation heatmap")
+                fig_hm = px.imshow(
+                    C,
+                    zmin=-1, zmax=1,
+                    color_continuous_scale="RdBu_r",
+                    aspect="auto",
+                    labels=dict(color="corr"),
+                    title=f"{corr_kind} on {ret_kind.split()[0].lower()} returns · last {len(wide)} rows",
+                    text_auto=False,
+                )
+                fig_hm.update_layout(margin=dict(t=40, r=10, b=10, l=10), height=520)
+                st.plotly_chart(fig_hm, use_container_width=True)
+
+                # 7) Top neg/pos pary (na nieuporządkowanej wartości C — to bez znaczenia dla zestawienia)
+                pairs = []
+                cols = C.columns.tolist()
+                for i in range(len(cols)):
+                    for j in range(i+1, len(cols)):
+                        pairs.append((cols[i], cols[j], C.iloc[i, j]))
+                pairs_sorted = sorted(pairs, key=lambda x: x[2])
+
+                col_left, col_right = st.columns(2)
+                with col_left:
+                    st.markdown("**Most negative correlations**")
+                    st.table(pd.DataFrame(pairs_sorted[:10], columns=["A", "B", "corr"]))
+                with col_right:
+                    st.markdown("**Most positive correlations**")
+                    st.table(pd.DataFrame(pairs_sorted[-10:][::-1], columns=["A", "B", "corr"]))
+
+                # # 8) Pobranie CSV
+                # st.download_button(
+                #     "Download correlation matrix (CSV)",
+                #     data=C.to_csv().encode(),
+                #     file_name=f"correlation_{corr_kind.lower()}_{len(wide)}rows.csv",
+                #     mime="text/csv"
+                # )
 
 
 st.markdown("<hr>", unsafe_allow_html=True)
