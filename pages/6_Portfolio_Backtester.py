@@ -688,7 +688,7 @@ exclude_tickers = st.sidebar.multiselect("Exclude tickers", options=all_tickers,
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("#### Exit rule")
-exit_mult = st.sidebar.slider("Close ≥ Low Forecast ×", 0.5, 1.99, 1.0, 0.01)
+exit_mult = st.sidebar.slider("Close ≥ Low Forecast ×", 0.5, 2.99, 1.0, 0.01)
 
 st.sidebar.markdown("#### Selection filters")
 min_ss  = st.sidebar.slider("Smart Score ≥",          0.0, 10.0, 7.0, 0.5)
