@@ -41,6 +41,36 @@ st.markdown(
 )
 ######### koniec kodu CSS - tu jest kod CSS do stylizowania strony - koniec kodu CSS ########
 
+
+# --- utils ---------------------------------------------------------------
+def clean_numeric(df: pd.DataFrame, columns: list[str]):
+    """
+    Zamienia wskazane kolumny na float.
+    Zwraca krotkę: (oczyszczony_df, dict{kolumna: DataFrame-z-błędami})
+    """
+    bad_values: dict[str, pd.DataFrame] = {}
+
+    for col in columns:
+        # zachowaj oryginał, a potem spróbuj na float
+        col_clean = (
+            df[col].astype(str)
+                  .str.replace(",", ".", regex=False)   # 1,23 → 1.23
+                  .str.strip()
+        )
+        as_num = pd.to_numeric(col_clean, errors="coerce")
+
+        # zapisz w df
+        df[col] = as_num
+
+        # zbierz wadliwe wiersze
+        mask_bad = as_num.isna() & col_clean.notna()
+        if mask_bad.any():
+            bad_values[col] = df.loc[mask_bad, ["Stock", col]].copy()
+
+    return df, bad_values
+# ------------------------------------------------------------------------
+
+
 # Title of the application
 st.title("Best stocks in S&P500 Index")
 
@@ -81,6 +111,23 @@ required_columns = [
     "Stock", "Sector", "Price", "Low Forecast Percent", "Median Forecast Percent",
     "High Forecast Percent", "Smart Score", "Score", "P/E ratio", "Number of analysts"
 ]
+# --- konwersja problematycznych kolumn na liczby ------------------------
+numeric_cols = [
+    "Low Forecast Percent", "Median Forecast Percent", "High Forecast Percent",
+    "Score", "Smart Score", "P/E ratio", "Number of analysts"
+]
+
+filtered_data, invalid_vals = clean_numeric(filtered_data, numeric_cols)
+
+# Pokaż, co nie przeszło konwersji
+if invalid_vals:                       # jeżeli słownik nie jest pusty
+    with st.sidebar.expander("Incorrect values rejected from calculations"):
+        for col, bad_df in invalid_vals.items():
+            st.write(f"**{col}** – rejected {bad_df.shape[0]} rows:")
+            st.dataframe(bad_df, use_container_width=True)
+
+# for col in required_columns:
+#     filtered_data[col] = pd.to_numeric(filtered_data[col].astype(str).str.replace(",", "."), errors="coerce")
 
 if all(col in filtered_data.columns for col in required_columns):
     # We create a selectbox for sectors
@@ -102,10 +149,10 @@ if all(col in filtered_data.columns for col in required_columns):
     # Filter data according to certain criteria
     scoring = filtered_data[required_columns].sort_values("Score", ascending=False, ignore_index=True)
     scoring = scoring[
-        (scoring["Smart Score"] > 8) &
+        (scoring["Smart Score"] >= 9) &
         (scoring["Score"] > 2) &
-        (scoring["Low Forecast Percent"] > -5) &
-        (scoring["Score"] < 6) &
+        (scoring["Low Forecast Percent"] > -10) &
+        (scoring["Score"] < 7) &
         (scoring["Number of analysts"] > 19)
         ]
 
@@ -1558,8 +1605,19 @@ Please note: Investing involves risk and you may lose some or all of your capita
 This site is provided for informational purposes only and does not constitute financial advice.
 """)
 
+# st.markdown("""
+#     <p style="font-size: 12px; text-align: left; color: gray;">
+#         Website made by @Michał Ostaszewski
+#     </p>
+# """, unsafe_allow_html=True)
+
 st.markdown("""
     <p style="font-size: 12px; text-align: left; color: gray;">
-        Website made by @Michał Ostaszewski
+        © 2025 App made by Michał Ostaszewski<br>
+        App source code licensed under the MIT License.<br>
+        All data used in this app is licensed under 
+        <a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" style="color: gray;">Creative Commons BY-NC 4.0</a>.<br>
+        See the <a href="https://github.com/michael-ostaszewski/stock_scraper_spx" target="_blank" style="color: gray;">GitHub repository</a> for full license details.<br>
+        ☕ Support the project(available soon, now enjoy the app for free) <a href="https://buymeacoffee.com/michal.dev" target="_blank" style="color: gray;">buymeacoffee.com/michal.dev</a>
     </p>
 """, unsafe_allow_html=True)
