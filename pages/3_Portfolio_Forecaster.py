@@ -1644,7 +1644,7 @@ def check_section_access(section_key: str) -> bool:
     return False
 
 st.markdown("<hr>", unsafe_allow_html=True)
-st.markdown("---")
+# st.markdown("---")
 st.header("AI portfolio commentary")
 
 # ---- USE: wrap your AI commentary section with the gate ----
