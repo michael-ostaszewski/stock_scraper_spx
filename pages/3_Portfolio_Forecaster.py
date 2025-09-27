@@ -6,6 +6,9 @@ import datetime
 import plotly.express as px
 import yfinance as yf
 import numpy as np
+import hashlib, hmac
+import time
+from openai import OpenAI
 
 
 # ======================================================================
@@ -1577,6 +1580,385 @@ else:
                 # )
 
 
+# ============================
+#  AI PORTFOLIO COMMENTARY (RAG-style prompt → OpenAI)
+#  — place at the very end of portfolio_forecaster page
+# ============================
+
+def _hash_sha256(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def _safe_rerun():
+    # backward compatible rerun
+    try:
+        st.rerun()
+    except Exception:
+        if hasattr(st, "experimental_rerun"):
+            st.experimental_rerun()
+
+def render_section_logout(section_key: str, label: str = "🔒 Log out of this section"):
+    ss_key = f"{section_key}__authed"
+    if st.session_state.get(ss_key, False):
+        if st.button(label, key=f"{section_key}__logout_main", use_container_width=True):
+            st.session_state[ss_key] = False
+            _safe_rerun()
+
+def check_section_access(section_key: str) -> bool:
+    """
+    Minimal password gate for a single section.
+
+    Expected secrets structure:
+      [auth]
+      passwords_plain = ["your_password1", "another_password2"]   # optional
+      passwords_sha256 = ["<sha256>", "<sha256>"]                  # optional
+    """
+    ss_key = f"{section_key}__authed"
+
+    # Already authenticated in this session?
+    if st.session_state.get(ss_key, False):
+        return True
+
+    cfg = st.secrets.get("auth", {})
+    plains = set(cfg.get("passwords_plain", []))
+    hashes = set(cfg.get("passwords_sha256", []))
+
+    if not plains and not hashes:
+        st.error("No passwords configured under st.secrets['auth']. Protection disabled.")
+        return False
+
+    with st.expander("🔒 This section is password-protected — click to unlock", expanded=True):
+        pw = st.text_input("Password", type="password", key=f"{section_key}__pw")
+        ok_clicked = st.button("Unlock", key=f"{section_key}__unlock", use_container_width=True)
+
+        if ok_clicked:
+            is_ok = any(hmac.compare_digest(pw, p) for p in plains) or (
+                pw and any(hmac.compare_digest(hashlib.sha256(pw.encode()).hexdigest(), h) for h in hashes)
+            )
+            if is_ok:
+                st.session_state[ss_key] = True
+                st.success("Access granted.")
+                _safe_rerun()
+            else:
+                st.error("Invalid password.")
+
+    return False
+
+st.markdown("<hr>", unsafe_allow_html=True)
+st.markdown("---")
+st.header("AI portfolio commentary")
+
+# ---- USE: wrap your AI commentary section with the gate ----
+if check_section_access("portfolio_ai_comment"):
+
+    with st.expander("Generate AI summary for my portfolio"):
+
+        # simple rate limit (reuse your pattern)
+        if "last_click_time_portfolio" not in st.session_state:
+            st.session_state["last_click_time_portfolio"] = 0.0
+
+        # ——— Guardrails / data requirements ———
+        if portfolio_df.empty:
+            st.info("Your portfolio is empty — add/upload positions first.")
+        elif "Stock" not in filtered_data.columns:
+            st.info("No forecast universe loaded for the selected date.")
+        else:
+            # Build a clean, compact view of current portfolio joined with forecasts
+            # 1) copy & normalize the portfolio (BUY positive, SELL negative)
+            _p = portfolio_df.copy()
+            _p["Symbol"] = _p["Symbol"].astype(str).str.upper()
+            _p["Volume"] = (
+                _p["Volume"].astype(str).str.replace(",", ".").astype(float, errors="ignore").fillna(0.0)
+            )
+            _p["Open price"] = (
+                _p["Open price"].astype(str).str.replace(",", ".").astype(float, errors="ignore").fillna(0.0)
+            )
+            _p["NetVolume"] = _p.apply(
+                lambda r: r["Volume"] if str(r["Type"]).upper() == "BUY" else -abs(r["Volume"]),
+                axis=1
+            )
+
+            # 2) aggregate to net position per ticker
+            pos = (
+                _p.groupby("Symbol", as_index=False)
+                  .agg({"NetVolume":"sum"})
+            )
+            pos = pos[pos["NetVolume"] != 0]   # leave only open positions
+
+            if pos.empty:
+                st.info("All positions net to zero — nothing to analyze.")
+            else:
+                # 3) latest prices/forecasts for the selected date
+                uni = filtered_data.copy()
+                uni["Stock"] = uni["Stock"].astype(str).str.upper()
+
+                # numeric clean-up
+                def _to_num(s):
+                    return pd.to_numeric(
+                        s.astype(str).str.replace(",", "."),
+                        errors="coerce"
+                    )
+                for c in ["Price","Low Forecast","Median Forecast","High Forecast",
+                          "Low Forecast Percent","Median Forecast Percent","High Forecast Percent",
+                          "P/E ratio","Smart Score","Score","Number of analysts"]:
+                    if c in uni.columns:
+                        uni[c] = _to_num(uni[c])
+
+                # Deduplicate to the last row per stock for that date (if multiple)
+                if "Date of record" in uni.columns:
+                    uni = (uni.sort_values(["Stock","Date of record"])
+                              .groupby("Stock", as_index=False).last())
+
+                # 4) merge portfolio net positions with forecasts
+                merged_port = pos.merge(
+                    uni,
+                    left_on="Symbol", right_on="Stock",
+                    how="left"
+                )
+
+                # average open price for context (value-weighted by signed volume)
+                _p_signed = _p.copy()
+                _p_signed["SignedCost"] = _p_signed["NetVolume"] * _p_signed["Open price"]
+                avg_open = (
+                    _p_signed.groupby("Symbol", as_index=False)
+                             .agg({"NetVolume":"sum","SignedCost":"sum"})
+                )
+                avg_open["Avg Open Price"] = avg_open.apply(
+                    lambda r: (r["SignedCost"]/r["NetVolume"]) if r["NetVolume"] else float("nan"),
+                    axis=1
+                )
+                merged_port = merged_port.merge(
+                    avg_open[["Symbol","Avg Open Price"]],
+                    on="Symbol", how="left"
+                )
+
+                # helpful deltas (% distance to forecast bands)
+                merged_port["Position Value (est.)"] = merged_port["NetVolume"] * merged_port["Price"]
+                merged_port["% below Low"]    = ((merged_port["Low Forecast"] - merged_port["Price"]) / merged_port["Low Forecast"] * 100.0)
+                merged_port["% to Median"]    = ((merged_port["Median Forecast"] - merged_port["Price"]) / merged_port["Median Forecast"] * 100.0)
+                merged_port["% above High"]   = ((merged_port["Price"] - merged_port["High Forecast"]) / merged_port["High Forecast"] * 100.0)
+
+                # Compact table for the LLM
+                cols_for_llm = [
+                    "Symbol","Sector","NetVolume","Price","Avg Open Price",
+                    "Low Forecast","Median Forecast","High Forecast",
+                    "Low Forecast Percent","Median Forecast Percent","High Forecast Percent",
+                    "Smart Score","Score","P/E ratio","Number of analysts",
+                    "Position Value (est.)","% below Low","% to Median","% above High"
+                ]
+                cols_for_llm = [c for c in cols_for_llm if c in merged_port.columns]
+                df_llm = merged_port[cols_for_llm].copy()
+
+                # light rounding to reduce token size
+                for c in df_llm.columns:
+                    if pd.api.types.is_float_dtype(df_llm[c]):
+                        df_llm[c] = df_llm[c].round(4)
+
+                # portfolio-level aggregates (context for the model)
+                port_ctx = {
+                    "total_investment_est": float(total_investment) if "total_investment" in locals() else None,
+                    "total_current_value_est": float(total_current_value) if "total_current_value" in locals() else None,
+                    "n_positions": int(df_llm.shape[0])
+                }
+
+                # ——— Prompt builder (EN) ———
+                def build_portfolio_prompt(df_payload: pd.DataFrame, context: dict) -> str:
+                    payload_csv = df_payload.to_csv(index=False)
+                    guidance = f"""
+You are a data-driven (quant) investment analyst. You will receive my current portfolio (table) and basic forecast metrics (Low/Median/High, %, Score, Smart Score, P/E, number of analysts) for each ticker.
+
+Task:
+1) If you have web browsing tools, briefly check only **material** fresh items (earnings, guidance, regulatory, M&A, product/recall, litigation) and upcoming catalysts (earnings date, lock-ups, conferences) for each ticker.  
+   • If you **cannot** browse, say so in one sentence and proceed based solely on the provided data.  
+2) For each position, assess valuation vs. forecast band: below Low (undervaluation), between Low–Median (neutral/cautious), between Median–High (overvaluation risk), or above High (hype/overvaluation).  
+3) Indicate, over a 12-month horizon, whether you see **reduce/sell risk** (strong signals: above High + weak fundamentals/newsflow) or rather **hold** (no significant red flags, data supports holding), assuming I’m a conservative investor who ignores week-to-week sentiment.  
+4) Give portfolio-level takeaways (2–4 sentences): key risks, sector/theme concentrations, expected return band by median, and whether “do nothing” vs. “trim X”.  
+5) Do **not** give financial advice — deliver analysis, risks, and conclusions only.
+
+**Portfolio context (estimates):**
+- Number of positions: {context.get("n_positions")}
+- Total cost (est.): {context.get("total_investment_est")}
+- Current value (est.): {context.get("total_current_value_est")}
+
+**Portfolio data (CSV):**
+{payload_csv}
+
+Keep it concise: one “overview” paragraph, then bullet points per ticker (max 2 sentences/ticker: [valuation signal + one fact/news + one conclusion]), and a short final summary (reduce anything or hold everything) with justification. Use the numbers from the table.
+"""
+                    return guidance.strip()
+
+                prompt_text = build_portfolio_prompt(df_llm, port_ctx)
+
+                # ============================
+                #  AI PORTFOLIO COMMENTARY — GPT-5 + web_search
+                # ============================
+
+                # 1) Model UI + (for GPT-5) reasoning/verbosity and web search toggles
+                model_choice = st.selectbox(
+                    "Choose the LLM model",
+                    ["gpt-5", "gpt-5-mini", "gpt-4o", "gpt-4o-mini"],
+                    help=("GPT-5 uses the Responses API and supports web_search. "
+                          "GPT-4o stays on Chat Completions.")
+                )
+
+                use_web_search = False
+                reasoning_effort = None
+                text_verbosity = None
+
+                if model_choice.startswith("gpt-5"):
+                    cols = st.columns(2)
+                    with cols[0]:
+                        reasoning_effort = st.selectbox(
+                            "Reasoning effort (GPT-5)",
+                            ["minimal", "low", "medium", "high"],
+                            index=2,
+                            help="Controls depth of reasoning. ‘minimal/low’ are faster, ‘high’ is more thorough."
+                        )
+                    with cols[1]:
+                        text_verbosity = st.selectbox(
+                            "Verbosity (GPT-5)",
+                            ["low", "medium", "high"],
+                            index=1,
+                            help="Steers output length. Not a hard cap."
+                        )
+                    use_web_search = st.checkbox(
+                        "Enable web search (GPT-5 Responses tool)",
+                        value=True,
+                        help="Lets the model fetch fresh information and return cited sources."
+                    )
+                    allowed_domains_str = ""
+                    if use_web_search:
+                        allowed_domains_str = st.text_input(
+                            "Allowed domains (optional, comma-separated, no https://)",
+                            value="",
+                            help="e.g., 'wsj.com, bloomberg.com, reuters.com'. Empty = no filter."
+                        )
+
+                # 2) Universal wrapper:
+                #    • gpt-5*  -> Responses API (no explicit max length; no temperature)
+                #    • gpt-4o* -> Chat Completions (with max_tokens)
+                def _llm_generate_portfolio_comment(
+                    client,
+                    model: str,
+                    system_text: str,
+                    user_text: str,
+                    reasoning: str | None = None,
+                    verbosity: str | None = None,
+                    web_search: bool = False,
+                    allowed_domains: list[str] | None = None,
+                    max_tokens_non5: int = 1400
+                ) -> tuple[str, list[str]]:
+                    """
+                    Returns (output_text, sources_urls).
+                    sources_urls — full list of URLs if web_search was used by the model.
+                    """
+                    messages = [
+                        {"role": "system", "content": system_text},
+                        {"role": "user", "content": user_text},
+                    ]
+
+                    # GPT-5 / GPT-5-mini
+                    if model.startswith("gpt-5"):
+                        req = {
+                            "model": model,
+                            "input": messages,
+                        }
+                        if reasoning:
+                            req["reasoning"] = {"effort": reasoning}
+                        if verbosity:
+                            req["text"] = {"verbosity": verbosity}
+
+                        tools = []
+                        if web_search:
+                            tool_def = {"type": "web_search"}
+                            if allowed_domains:
+                                tool_def["filters"] = {"allowed_domains": allowed_domains[:20]}
+                            tools.append(tool_def)
+                        if tools:
+                            req["tools"] = tools
+                            req["tool_choice"] = "auto"
+                            req["include"] = ["web_search_call.action.sources"]
+
+                        # no max_output_tokens per your preference
+                        resp = client.responses.create(**req)
+
+                        out_text = getattr(resp, "output_text", None)
+                        if not out_text:
+                            out_text = ""
+                            for item in getattr(resp, "output", []) or []:
+                                if item.get("type") == "message":
+                                    for c in item.get("content", []) or []:
+                                        if c.get("type") == "output_text":
+                                            out_text += c.get("text", "")
+
+                        sources = []
+                        try:
+                            for item in resp.output or []:
+                                if item.get("type") == "web_search_call":
+                                    action = item.get("action", {})
+                                    srcs = action.get("sources") or []
+                                    for s in srcs:
+                                        url = s.get("url")
+                                        if url:
+                                            sources.append(url)
+                        except Exception:
+                            pass
+
+                        return out_text.strip(), sources
+
+                    # GPT-4o / 4o-mini — Chat Completions
+                    else:
+                        cc = client.chat.completions.create(
+                            model=model,
+                            messages=messages,
+                            temperature=0.5,
+                            max_tokens=max_tokens_non5,
+                        )
+                        text = cc.choices[0].message.content.strip()
+                        return text, []
+
+                # 3) Trigger
+                if st.button("Generate AI commentary for my portfolio"):
+                    now = time.time()
+                    if now - st.session_state["last_click_time_portfolio"] < 120:
+                        st.warning("Please wait 120 seconds before requesting another commentary.")
+                    else:
+                        st.session_state["last_click_time_portfolio"] = now
+                        try:
+                            client = OpenAI(api_key=st.secrets["openai"]["OPENAI_API_KEY"])
+                            with st.spinner("Generating AI commentary…"):
+                                out_text, sources = _llm_generate_portfolio_comment(
+                                    client=client,
+                                    model=model_choice,
+                                    system_text=("You are a precise, concise quantitative analyst. "
+                                                 "Avoid investment advice; provide analysis, risks, and conclusions."),
+                                    user_text=prompt_text,
+                                    reasoning=reasoning_effort if model_choice.startswith("gpt-5") else None,
+                                    verbosity=text_verbosity if model_choice.startswith("gpt-5") else None,
+                                    web_search=(use_web_search if model_choice.startswith("gpt-5") else False),
+                                    allowed_domains=[d.strip() for d in (allowed_domains_str or "").split(",") if d.strip()] if (
+                                        use_web_search and model_choice.startswith("gpt-5")
+                                    ) else None,
+                                )
+
+                            st.success("Commentary ready:")
+                            st.write(out_text)
+
+                            if sources:
+                                with st.expander("Sources (web search)"):
+                                    for u in dict.fromkeys(sources):  # dedup
+                                        st.markdown(f"- <{u}>", unsafe_allow_html=False)
+
+                        except Exception as e:
+                            st.error(f"Failed to generate commentary (model '{model_choice}'): {e}")
+
+    render_section_logout("portfolio_ai_comment")
+    pass
+else:
+    st.stop()  # stop rendering the rest of the page below this section (optional)
+
+
+
+
 st.markdown("<hr>", unsafe_allow_html=True)
 
 st.markdown("""\
@@ -1590,3 +1972,399 @@ st.markdown("""
         Website made by @Michał Ostaszewski
     </p>
 """, unsafe_allow_html=True)
+
+
+
+#PL AI comentary code
+# # ============================
+# #  AI PORTFOLIO COMMENTARY (RAG-style prompt → OpenAI)
+# #  — place at the very end of portfolio_forecaster page
+# # ============================
+#
+#
+# def _hash_sha256(s: str) -> str:
+#     return hashlib.sha256(s.encode("utf-8")).hexdigest()
+#
+#
+# def _safe_rerun():
+#     # kompatybilność wstecz
+#     try:
+#         st.rerun()
+#     except Exception:
+#         # starsze wersje
+#         if hasattr(st, "experimental_rerun"):
+#             st.experimental_rerun()
+#
+# def render_section_logout(section_key: str, label: str = "🔒 Wyloguj tę sekcję"):
+#     ss_key = f"{section_key}__authed"
+#     if st.session_state.get(ss_key, False):
+#         if st.button(label, key=f"{section_key}__logout_main", use_container_width=True):
+#             st.session_state[ss_key] = False
+#             _safe_rerun()   # Twoja funkcja z wcześniejszego patcha (używa st.rerun())
+#
+#
+# def check_section_access(section_key: str) -> bool:
+#     ss_key = f"{section_key}__authed"
+#
+#     if st.session_state.get(ss_key, False):
+#         return True
+#
+#     cfg = st.secrets.get("auth", {})
+#     plains = set(cfg.get("passwords_plain", []))
+#     hashes = set(cfg.get("passwords_sha256", []))
+#
+#     if not plains and not hashes:
+#         st.error("Brak skonfigurowanych haseł w st.secrets['auth']. Zabezpieczenie wyłączone.")
+#         return False
+#
+#     with st.expander("🔒 Ta sekcja jest chroniona hasłem — kliknij, aby odblokować", expanded=True):
+#         pw = st.text_input("Hasło", type="password", key=f"{section_key}__pw")
+#
+#         ok_clicked = st.button("Odblokuj", key=f"{section_key}__unlock", use_container_width=True)
+#
+#         if ok_clicked:
+#             is_ok = any(hmac.compare_digest(pw, p) for p in plains) or (
+#                     pw and any(hmac.compare_digest(hashlib.sha256(pw.encode()).hexdigest(), h) for h in hashes)
+#             )
+#             if is_ok:
+#                 st.session_state[ss_key] = True
+#                 st.success("Dostęp przyznany.")
+#                 _safe_rerun()
+#             else:
+#                 st.error("Nieprawidłowe hasło.")
+#
+#         # st.caption("Ustaw hasła w `.streamlit/secrets.toml` → [auth] …")
+#
+#     return False
+#
+#
+# st.markdown("---")
+# st.header("AI portfolio commentary")
+#
+# # ---- UŻYCIE: otocz swoją sekcję komentarza AI ----
+# if check_section_access("portfolio_ai_comment"):
+#
+#     with st.expander("Generate AI summary & sanity-check for my portfolio"):
+#
+#         # simple rate-limit reusing the pattern from your other page
+#         if "last_click_time_portfolio" not in st.session_state:
+#             st.session_state["last_click_time_portfolio"] = 0.0
+#
+#         # ——— Guardrails / data requirements ———
+#         if portfolio_df.empty:
+#             st.info("Your portfolio is empty — add/upload positions first.")
+#         elif "Stock" not in filtered_data.columns:
+#             st.info("No forecast universe loaded for the selected date.")
+#         else:
+#             # Build a clean, compact view of your current portfolio joined with forecasts
+#             # 1) copy & normalize the portfolio (BUY positive, SELL negative)
+#             _p = portfolio_df.copy()
+#             _p["Symbol"] = _p["Symbol"].astype(str).str.upper()
+#             _p["Volume"] = (
+#                 _p["Volume"].astype(str).str.replace(",", ".").astype(float, errors="ignore").fillna(0.0)
+#             )
+#             _p["Open price"] = (
+#                 _p["Open price"].astype(str).str.replace(",", ".").astype(float, errors="ignore").fillna(0.0)
+#             )
+#             _p["NetVolume"] = _p.apply(
+#                 lambda r: r["Volume"] if str(r["Type"]).upper() == "BUY" else -abs(r["Volume"]),
+#                 axis=1
+#             )
+#
+#             # 2) aggregate to net position per ticker
+#             pos = (
+#                 _p.groupby("Symbol", as_index=False)
+#                   .agg({"NetVolume":"sum"})
+#             )
+#             pos = pos[pos["NetVolume"] != 0]   # leave only open positions
+#
+#             if pos.empty:
+#                 st.info("All positions net to zero — nothing to analyze.")
+#             else:
+#                 # 3) latest prices/forecasts for the selected date
+#                 uni = filtered_data.copy()
+#                 uni["Stock"] = uni["Stock"].astype(str).str.upper()
+#
+#                 # numeric clean-up
+#                 def _to_num(s):
+#                     return pd.to_numeric(
+#                         s.astype(str).str.replace(",", "."),
+#                         errors="coerce"
+#                     )
+#                 for c in ["Price","Low Forecast","Median Forecast","High Forecast",
+#                           "Low Forecast Percent","Median Forecast Percent","High Forecast Percent",
+#                           "P/E ratio","Smart Score","Score","Number of analysts"]:
+#                     if c in uni.columns:
+#                         uni[c] = _to_num(uni[c])
+#
+#                 # Deduplicate to the last row per stock for that date (if multiple)
+#                 if "Date of record" in uni.columns:
+#                     uni = (uni.sort_values(["Stock","Date of record"])
+#                               .groupby("Stock", as_index=False).last())
+#
+#                 # 4) merge portfolio net positions with forecasts
+#                 merged_port = pos.merge(
+#                     uni,
+#                     left_on="Symbol", right_on="Stock",
+#                     how="left"
+#                 )
+#
+#                 # join average open price for context (value-weighted by signed volume)
+#                 _p_signed = _p.copy()
+#                 _p_signed["SignedCost"] = _p_signed["NetVolume"] * _p_signed["Open price"]
+#                 avg_open = (
+#                     _p_signed.groupby("Symbol", as_index=False)
+#                              .agg({"NetVolume":"sum","SignedCost":"sum"})
+#                 )
+#                 avg_open["Avg Open Price"] = avg_open.apply(
+#                     lambda r: (r["SignedCost"]/r["NetVolume"]) if r["NetVolume"] else float("nan"),
+#                     axis=1
+#                 )
+#                 merged_port = merged_port.merge(
+#                     avg_open[["Symbol","Avg Open Price"]],
+#                     on="Symbol", how="left"
+#                 )
+#
+#                 # compute helpful deltas (% distance to bands)
+#                 merged_port["Position Value (est.)"] = merged_port["NetVolume"] * merged_port["Price"]
+#                 merged_port["% below Low"]    = ( (merged_port["Low Forecast"] - merged_port["Price"]) / merged_port["Low Forecast"] * 100.0 )
+#                 merged_port["% to Median"]    = ( (merged_port["Median Forecast"] - merged_port["Price"]) / merged_port["Median Forecast"] * 100.0 )
+#                 merged_port["% above High"]   = ( (merged_port["Price"] - merged_port["High Forecast"]) / merged_port["High Forecast"] * 100.0 )
+#
+#                 # Compact table to ship to the LLM (keeps tokens low, but rich enough)
+#                 cols_for_llm = [
+#                     "Symbol","Sector","NetVolume","Price","Avg Open Price",
+#                     "Low Forecast","Median Forecast","High Forecast",
+#                     "Low Forecast Percent","Median Forecast Percent","High Forecast Percent",
+#                     "Smart Score","Score","P/E ratio","Number of analysts",
+#                     "Position Value (est.)","% below Low","% to Median","% above High"
+#                 ]
+#                 cols_for_llm = [c for c in cols_for_llm if c in merged_port.columns]
+#                 df_llm = merged_port[cols_for_llm].copy()
+#
+#                 # small rounding to reduce token size
+#                 for c in df_llm.columns:
+#                     if pd.api.types.is_float_dtype(df_llm[c]):
+#                         df_llm[c] = df_llm[c].round(4)
+#
+#                 # portfolio-level aggregates (context for the model)
+#                 port_ctx = {
+#                     "total_investment_est": float(total_investment) if "total_investment" in locals() else None,
+#                     "total_current_value_est": float(total_current_value) if "total_current_value" in locals() else None,
+#                     "n_positions": int(df_llm.shape[0])
+#                 }
+#
+#
+#
+#                 # ——— Prompt builder (PL, mirrors your requested intent) ———
+#                 def build_portfolio_prompt(df_payload: pd.DataFrame, context: dict) -> str:
+#                     # Convert the payload to a compact CSV-like block to keep it readable for the model
+#                     payload_csv = df_payload.to_csv(index=False)
+#                     guidance = f"""
+#     Jesteś analitykiem inwestycyjnym nastawionym na dane (quant). Otrzymasz mój aktualny portfel (tabela) oraz podstawowe metryki prognoz (Low/Median/High Forecast, %, Score, Smart Score, P/E, liczba analityków) dla każdej spółki.
+#
+#     **Zadanie:**
+#     1) Jeśli masz narzędzia do przeglądania internetu, poszukaj BARDZO KRÓTKO aktualnych, *istotnych* newsów (earnings, guidances, regulatory, M&A, product/recall, litigations) i nadchodzących wydarzeń (earnings date, lock-up, konferencje) dla każdej spółki.
+#        • Jeżeli NIE możesz przeglądać sieci – powiedz o tym jednym zdaniem i przejdź do analizy wyłącznie na bazie przekazanych danych.
+#     2) Dla każdej pozycji oceń stan wyceny w kontekście pasma prognoz: czy kurs jest poniżej Low (undervaluation), między Low-Median (neutral/ostrożnie), między Median-High (ryzyko przewartościowania), czy powyżej High (hype/przewartościowanie).
+#     3) Wskaż, czy w perspektywie 12 miesięcy widzisz przesłanki do **sprzedaży** (silne sygnały: powyżej High + słabe fundamenty/newsflow), czy raczej **trzymać** (brak istotnych zagrożeń, dane wspierają hold), pamiętając, że jestem konserwatywnym inwestorem i nie reaguję na tygodniowe wahania nastrojów.
+#     4) Podaj syntetyczne wnioski portfela (2–4 zdania): główne ryzyka, koncentracje sektorowe/tematyczne, oczekiwane pasmo zwrotu wg mediany, oraz czy „nic nie robić” vs. „zredukować X”.
+#     5) Nie dawaj porad finansowych – to ma być analiza i wnioski, bez imperatywów.
+#
+#     **Kontekst portfela (szacunki):**
+#     - Liczba pozycji: {context.get("n_positions")}
+#     - Nakłady łączne (est.): {context.get("total_investment_est")}
+#     - Wycena bieżąca (est.): {context.get("total_current_value_est")}
+#
+#     **Dane portfela (CSV):**
+#     {payload_csv}
+#
+#     Zachowaj zwięzłość: 1 akapit „overview”, potem punktowo po spółkach (max 2 zdania/spółkę: [sygnał wyceny + 1 fakt/news + 1 wniosek]), na końcu krótkie podsumowanie decyzji (sprzedać coś? czy raczej hold wszystkiego) z uzasadnieniem. Używaj liczb i metryk z tabeli.
+#     """
+#                     return guidance.strip()
+#
+#                 prompt_text = build_portfolio_prompt(df_llm, port_ctx)
+#
+#                 # ——— Optional: show the exact prompt sent ———
+#                 # st.code(prompt_text)
+#                 #
+#                 # # --- dodatkowe pytanie użytkownika (opcjonalne) ---
+#                 # user_portfolio_question = st.text_area(
+#                 #     "Dodatkowe pytanie do mojego portfolio (opcjonalnie)",
+#                 #     placeholder="Np. Które pozycje wydają się być najbardziej ryzykowne przy obecnych wycenach?",
+#                 #     help="To pytanie zostanie zadane modelowi po głównej analizie i odniesione do Twoich danych z tabeli."
+#                 # )
+#
+#
+#                 # ============================
+#                 #  AI PORTFOLIO COMMENTARY — patch pod GPT-5 + web_search
+#                 # ============================
+#
+#                 # 1) UI: modele + (dla GPT-5) sterowanie reasoning/verbosity i web search
+#                 model_choice = st.selectbox(
+#                     "Choose the LLM Model",
+#                     ["gpt-5", "gpt-5-mini", "gpt-4o", "gpt-4o-mini"],
+#                     help=("GPT-5 używa Responses API i wspiera web_search. "
+#                           "GPT-4o pozostaje przez Chat Completions.")
+#                 )
+#
+#                 use_web_search = False
+#                 reasoning_effort = None
+#                 text_verbosity = None
+#
+#                 if model_choice.startswith("gpt-5"):
+#                     cols = st.columns(2)
+#                     with cols[0]:
+#                         reasoning_effort = st.selectbox(
+#                             "Reasoning effort (GPT-5)",
+#                             ["minimal", "low", "medium", "high"],
+#                             index=2,
+#                             help="Steruje głębokością rozumowania. 'minimal' i 'low' są szybsze, 'high' dokładniejsze."
+#                         )
+#                     with cols[1]:
+#                         text_verbosity = st.selectbox(
+#                             "Verbosity (GPT-5)",
+#                             ["low", "medium", "high"],
+#                             index=1,
+#                             help="Kontroluje długość odpowiedzi. Nie jest twardym limitem."
+#                         )
+#                     use_web_search = st.checkbox(
+#                         "Enable web search (GPT-5 Responses tool)",
+#                         value=True,
+#                         help="Pozwala modelowi wyszukiwać świeże informacje i zwracać cytowane źródła."
+#                     )
+#                     allowed_domains_str = ""
+#                     if use_web_search:
+#                         allowed_domains_str = st.text_input(
+#                             "Allowed domains (optional, comma-separated, bez https://)",
+#                             value="",
+#                             help="Np. 'wsj.com, bloomberg.com, reuters.com'. Puste = bez filtra."
+#                         )
+#
+#
+#                 # 2) Uniwersalny wrapper:
+#                 #    • gpt-5*  -> Responses API (bez limitu długości jak prosiłeś; nie wysyłamy temperature)
+#                 #    • gpt-4o* -> Chat Completions (z max_tokens)
+#                 def _llm_generate_portfolio_comment(client, model: str, system_text: str, user_text: str,
+#                                                     reasoning: str | None = None,
+#                                                     verbosity: str | None = None,
+#                                                     web_search: bool = False,
+#                                                     allowed_domains: list[str] | None = None,
+#                                                     max_tokens_non5: int = 1400) -> tuple[str, list[str]]:
+#                     """
+#                     Zwraca: (output_text, sources_urls)
+#                     sources_urls — pełna lista URLi, gdy web_search był użyty i model z niego skorzystał.
+#                     """
+#                     messages = [
+#                         {"role": "system", "content": system_text},
+#                         {"role": "user", "content": user_text},
+#                     ]
+#
+#                     # GPT-5 / GPT-5-mini
+#                     if model.startswith("gpt-5"):
+#                         req = {
+#                             "model": model,
+#                             "input": messages,  # Responses API akceptuje listę messages
+#                         }
+#                         # parametry specyficzne dla GPT-5
+#                         if reasoning:
+#                             req["reasoning"] = {"effort": reasoning}
+#                         if verbosity:
+#                             req["text"] = {"verbosity": verbosity}
+#
+#                         tools = []
+#                         if web_search:
+#                             tool_def = {"type": "web_search"}
+#                             # filtr domen (opcjonalny)
+#                             if allowed_domains:
+#                                 tool_def["filters"] = {"allowed_domains": allowed_domains[:20]}
+#                             tools.append(tool_def)
+#                         if tools:
+#                             req["tools"] = tools
+#                             req["tool_choice"] = "auto"
+#                             # chcemy pełną listę źródeł
+#                             req["include"] = ["web_search_call.action.sources"]
+#
+#                         # UWAGA: zgodnie z Twoją prośbą NIE ustawiamy max_output_tokens
+#                         resp = client.responses.create(**req)
+#
+#                         # Tekst
+#                         out_text = getattr(resp, "output_text", None)
+#                         if not out_text:
+#                             # fallback: złożyć tekst z elementów
+#                             out_text = ""
+#                             for item in getattr(resp, "output", []) or []:
+#                                 if item.get("type") == "message":
+#                                     for c in item.get("content", []) or []:
+#                                         if c.get("type") == "output_text":
+#                                             out_text += c.get("text", "")
+#
+#                         # Źródła (pełna lista)
+#                         sources = []
+#                         try:
+#                             for item in resp.output or []:
+#                                 if item.get("type") == "web_search_call":
+#                                     action = item.get("action", {})
+#                                     # Response SDK często ma to też pod include; sprawdzamy obie ścieżki:
+#                                     srcs = action.get("sources") or []
+#                                     for s in srcs:
+#                                         url = s.get("url")
+#                                         if url: sources.append(url)
+#                         except Exception:
+#                             pass
+#
+#                         return out_text.strip(), sources
+#
+#                     # GPT-4o / 4o-mini — Chat Completions
+#                     else:
+#                         cc = client.chat.completions.create(
+#                             model=model,
+#                             messages=messages,
+#                             # GPT-4o akceptuje temperature — zostawiamy umiarkowaną
+#                             temperature=0.5,
+#                             max_tokens=max_tokens_non5,
+#                         )
+#                         text = cc.choices[0].message.content.strip()
+#                         return text, []
+#
+#
+#                 # 3) Wywołanie (w miejscu Twojego przycisku)
+#                 if st.button("Wygeneruj komentarz AI o moim portfelu"):
+#                     now = time.time()
+#                     if now - st.session_state["last_click_time_portfolio"] < 120:
+#                         st.warning("Odczekaj proszę 120 sekund przed kolejnym komentarzem.")
+#                     else:
+#                         st.session_state["last_click_time_portfolio"] = now
+#                         try:
+#                             client = OpenAI(api_key=st.secrets["openai"]["OPENAI_API_KEY"])
+#                             with st.spinner("Generuję komentarz AI…"):
+#                                 out_text, sources = _llm_generate_portfolio_comment(
+#                                     client=client,
+#                                     model=model_choice,
+#                                     system_text=("Jesteś precyzyjnym, zwięzłym analitykiem ilościowym. "
+#                                                  "Unikasz porad inwestycyjnych; formułujesz analizę, ryzyka i wnioski."),
+#                                     user_text=prompt_text,
+#                                     reasoning=reasoning_effort if model_choice.startswith("gpt-5") else None,
+#                                     verbosity=text_verbosity if model_choice.startswith("gpt-5") else None,
+#                                     web_search=(use_web_search if model_choice.startswith("gpt-5") else False),
+#                                     allowed_domains=[d.strip() for d in (allowed_domains_str or "").split(",") if
+#                                                      d.strip()] if (
+#                                                 use_web_search and model_choice.startswith("gpt-5")) else None,
+#                                 )
+#
+#                             st.success("Komentarz gotowy:")
+#                             st.write(out_text)
+#
+#                             # Pokaż źródła, jeśli są
+#                             if sources:
+#                                 with st.expander("Źródła z wyszukiwania"):
+#                                     for u in dict.fromkeys(sources):  # dedup
+#                                         st.markdown(f"- <{u}>", unsafe_allow_html=False)
+#
+#                         except Exception as e:
+#                             st.error(f"Nie udało się wygenerować komentarza (model '{model_choice}'): {e}")
+#
+#     render_section_logout("portfolio_ai_comment")
+#     pass
+# else:
+#     st.stop()   # zatrzymuje render reszty tej strony pod sekcją (opcjonalnie)
