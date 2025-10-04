@@ -207,45 +207,237 @@ custom_html = f"""
 </details>
 """
 
-# ======================================================================
-# 6. CSV file upload section
-# ======================================================================
-st.markdown("#### Upload a CSV file with a list of stocks in your portfolio:")
-st.markdown(custom_html, unsafe_allow_html=True)
-uploaded_file = st.file_uploader("", type=["csv"])
-if uploaded_file is not None:
-    # If it's a new file, merge it with the portfolio; otherwise ignore
-    if uploaded_file.name != st.session_state["last_uploaded_file_name"]:
-        try:
-            csv_df = pd.read_csv(uploaded_file, delimiter=';')
-            # Make sure we have all required columns (or add them empty)
-            for col in ["Symbol", "Type", "Volume", "Open price", "Open time"]:
-                if col not in csv_df.columns:
-                    csv_df[col] = ""
+# # ======================================================================
+# # 6. CSV file upload section
+# # ======================================================================
+# st.markdown("#### Upload a CSV file with a list of stocks in your portfolio:")
+# st.markdown(custom_html, unsafe_allow_html=True)
+# uploaded_file = st.file_uploader("", type=["csv"])
+# if uploaded_file is not None:
+#     # If it's a new file, merge it with the portfolio; otherwise ignore
+#     if uploaded_file.name != st.session_state["last_uploaded_file_name"]:
+#         try:
+#             csv_df = pd.read_csv(uploaded_file, delimiter=';')
+#             # Make sure we have all required columns (or add them empty)
+#             for col in ["Symbol", "Type", "Volume", "Open price", "Open time"]:
+#                 if col not in csv_df.columns:
+#                     csv_df[col] = ""
+#
+#             st.session_state["user_portfolio_df"] = pd.concat(
+#                 [st.session_state["user_portfolio_df"], csv_df],
+#                 ignore_index=True
+#             ).fillna("")
+#             st.session_state["last_uploaded_file_name"] = uploaded_file.name
+#             st.success(f"Successfully loaded CSV file: {uploaded_file.name}")
+#         except Exception as e:
+#             st.error(f"Error loading CSV file: {e}")
+#     else:
+#         st.info("This same CSV file has already been processed previously (not duplicating data).")
+#
+# # st.markdown("<hr>", unsafe_allow_html=True)
+#
+# st.markdown(
+#     """
+#     <div style="display: flex; align-items: center; margin: 20px 0;">
+#       <hr style="flex: 1; border: none; border-top: 1px solid #ccc;">
+#       <span style="margin: 0 10px; color: #888; font-size: 14px;">or/and</span>
+#       <hr style="flex: 1; border: none; border-top: 1px solid #ccc;">
+#     </div>
+#     """,
+#     unsafe_allow_html=True
+# )
 
-            st.session_state["user_portfolio_df"] = pd.concat(
-                [st.session_state["user_portfolio_df"], csv_df],
-                ignore_index=True
-            ).fillna("")
-            st.session_state["last_uploaded_file_name"] = uploaded_file.name
-            st.success(f"Successfully loaded CSV file: {uploaded_file.name}")
-        except Exception as e:
-            st.error(f"Error loading CSV file: {e}")
+
+# ======================================================================
+# 6. Unified upload: CSV *or* XLSX (auto-transform for XLSX)
+# ======================================================================
+import io
+import re
+
+st.markdown("#### Upload a CSV or XLSX file with a list of stocks in your portfolio:")
+
+@st.cache_data
+def _load_example_portfolio():  # zachowujemy poprzednią pomocniczą funkcję
+    url = (
+        "https://raw.githubusercontent.com/michael-ostaszewski/stock_scraper_spx/refs/heads/main/Example%20csv%20file%20portfolio%20forecaster/xtb%20stock%20list.csv"
+    )
+    return pd.read_csv(url, delimiter=';')
+
+try:
+    _example_df = _load_example_portfolio()
+except Exception:
+    _example_df = pd.DataFrame({
+        "Symbol": ["AAPL", "MSFT"],
+        "Type":   ["BUY", "BUY"],
+        "Volume": [1, 2],
+        "Open time": ["" , ""],
+        "Open price": [0, 0],
+    })
+
+st.caption("Accepted formats: **.csv**, **.xlsx**, **.xls**")
+uploaded_any = st.file_uploader("", type=["csv", "xlsx", "xls"])
+
+# ---------- helpers specific for XLSX transform ----------
+def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
+    def norm(s):
+        s = str(s).strip()
+        return s, s.lower().replace(" ", "").replace("_", "")
+    mapping = {c: norm(c) for c in df.columns}
+    df.attrs["__simple_cols__"] = mapping
+    return df
+
+def _find_column(df: pd.DataFrame, candidates) -> str:
+    mapping = df.attrs.get("__simple_cols__", {})
+    simp_to_orig = {v[1]: k for k, v in mapping.items()}
+    cand_simplified = [c.lower().replace(" ", "").replace("_", "") for c in candidates]
+    for cs in cand_simplified:
+        if cs in simp_to_orig:
+            return simp_to_orig[cs]
+    # fallback: zawieranie
+    for cs in cand_simplified:
+        for simp, orig in ((v[1], k) for k, v in mapping.items()):
+            if cs in simp:
+                return orig
+    raise KeyError(f"Column not found for patterns: {candidates}")
+
+def _coerce_number(x):
+    if pd.isna(x):
+        return np.nan
+    if isinstance(x, (int, float, np.number)):
+        return float(x)
+    s = str(x).strip().replace(" ", "").replace("\u00a0", "").replace("\xa0", "")
+    if s.count(",") == 1 and s.count(".") == 0:
+        s = s.replace(",", ".")
+    if s.count(",") == 1 and s.count(".") >= 1:
+        s = s.replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return np.nan
+
+def _parse_datetime_flex(x):
+    if pd.isna(x) or str(x).strip() == "":
+        return ""
+    if isinstance(x, (pd.Timestamp, np.datetime64)):
+        dt = pd.to_datetime(x, errors="coerce")
     else:
-        st.info("This same CSV file has already been processed previously (not duplicating data).")
+        s = str(x).strip()
+        dt = pd.to_datetime(s, errors="coerce", dayfirst=True, infer_datetime_format=True)
+        if pd.isna(dt):
+            dt = pd.to_datetime(s, errors="coerce", dayfirst=False, infer_datetime_format=True)
+    if pd.isna(dt):
+        return ""
+    return dt.strftime("%d/%m/%Y %H:%M:%S")
 
-# st.markdown("<hr>", unsafe_allow_html=True)
-
-st.markdown(
+def _process_xlsx_to_df(uploaded_file) -> pd.DataFrame:
     """
-    <div style="display: flex; align-items: center; margin: 20px 0;">
-      <hr style="flex: 1; border: none; border-top: 1px solid #ccc;">
-      <span style="margin: 0 10px; color: #888; font-size: 14px;">or/and</span>
-      <hr style="flex: 1; border: none; border-top: 1px solid #ccc;">
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+    Przyjmuje UploadedFile (XLSX/XLS), zwraca DataFrame w docelowym formacie:
+    columns = ["Symbol", "Type", "Volume", "Open price", "Open time"]
+    """
+    # czytamy bytes do pamięci, by móc używać wielokrotnie (ExcelFile + parse)
+    raw = uploaded_file.read()
+    bio = io.BytesIO(raw)
+
+    # Wybór arkusza: nazwa zawiera BOTH "OPEN" i "POSITION" (case-insensitive)
+    xls = pd.ExcelFile(bio, engine="openpyxl")
+    sheet_candidates = [n for n in xls.sheet_names if ("OPEN" in n.upper() and "POSITION" in n.upper())]
+    if not sheet_candidates:
+        raise ValueError(
+            "No worksheet matching 'OPEN*POSITION*' found. Sheets: " + ", ".join(xls.sheet_names)
+        )
+    sheet_name = sheet_candidates[0]
+
+    # parse wymaga odświeżenia wskaźnika pliku (nowy BytesIO)
+    bio2 = io.BytesIO(raw)
+    df = pd.read_excel(bio2, sheet_name=sheet_name, engine="openpyxl", skiprows=10, header=0)
+
+    # sprzątanie
+    df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+    df = _normalize_cols(df)
+
+    # usuń wiersze z "total"
+    mask_total = df.astype(str).apply(lambda col: col.str.contains("total", case=False, na=False)).any(axis=1)
+    df = df.loc[~mask_total].copy()
+
+    # usuń ostatni wiersz (często stopka)
+    if len(df) > 0:
+        df = df.iloc[:-1, :].copy()
+
+    # mapowanie kolumn
+    col_symbol   = _find_column(df, ["Symbol", "Ticker", "Instrument"])
+    col_type     = _find_column(df, ["Type", "Side", "Action", "Operation"])
+    col_volume   = _find_column(df, ["Volume", "Qty", "Quantity", "Amount", "Size"])
+    col_opentime = _find_column(df, ["OpenTime", "Open time", "Open_time", "Time open", "Opened time"])
+    col_openpx   = _find_column(df, ["OpenPrice", "Open price", "Open_price", "Price open"])
+
+    df = df[[col_symbol, col_type, col_volume, col_opentime, col_openpx]].copy()
+    df.columns = ["Symbol", "Type", "Volume", "Open time", "Open price"]
+
+    # formatowanie
+    df["Symbol"] = (
+        df["Symbol"].astype(str).str.strip().str.upper()
+          .str.replace(r"\.us$", "", case=False, regex=True)  # utnij .us
+    )
+    df["Type"] = df["Type"].astype(str).str.strip().str.upper()
+    df["Volume"] = df["Volume"].map(_coerce_number)
+    df["Open price"] = df["Open price"].map(_coerce_number)
+    df["Open time"] = df["Open time"].map(_parse_datetime_flex)
+
+    # usuń puste
+    df = df[(df["Symbol"] != "") & (df["Open time"] != "")]
+    df = df.dropna(subset=["Volume", "Open price"])
+
+    # Dla Twojej aplikacji lepiej trzymać liczby jako floaty (konwersje robisz później)
+    # więc NIE zamieniam na stringi z przecinkiem – zostawiam float.
+    # Kolejność kolumn zgodna z resztą aplikacji:
+    return df[["Symbol", "Type", "Volume", "Open price", "Open time"]].reset_index(drop=True)
+
+# ---------- main upload handler ----------
+if uploaded_any is not None:
+    # sprawdź duplikat po nazwie pliku
+    if uploaded_any.name != st.session_state["last_uploaded_file_name"]:
+        try:
+            name_lower = uploaded_any.name.lower()
+            if name_lower.endswith(".csv"):
+                # CSV (jak wcześniej): średnik, brakujące kolumny → dopełniamy
+                csv_df = pd.read_csv(uploaded_any, delimiter=';')
+                for col in ["Symbol", "Type", "Volume", "Open price", "Open time"]:
+                    if col not in csv_df.columns:
+                        csv_df[col] = ""
+                # normalizacja symboli (zgodnie z tym co robimy przy XLSX)
+                csv_df["Symbol"] = (
+                    csv_df["Symbol"].astype(str).str.strip().str.upper()
+                          .str.replace(r"\.us$", "", case=False, regex=True)
+                )
+                # dopinamy
+                st.session_state["user_portfolio_df"] = pd.concat(
+                    [st.session_state["user_portfolio_df"], csv_df[["Symbol","Type","Volume","Open price","Open time"]]],
+                    ignore_index=True
+                ).fillna("")
+                st.session_state["last_uploaded_file_name"] = uploaded_any.name
+                st.success(f"Successfully loaded CSV file: {uploaded_any.name}")
+
+            elif name_lower.endswith(".xlsx") or name_lower.endswith(".xls"):
+                # XLSX/XLS → transformacja do docelowych kolumn
+                df_x = _process_xlsx_to_df(uploaded_any)
+                # dopinamy (floaty zostają; reszta appki już radzi sobie z konwersjami)
+                st.session_state["user_portfolio_df"] = pd.concat(
+                    [st.session_state["user_portfolio_df"], df_x],
+                    ignore_index=True
+                )
+                st.session_state["last_uploaded_file_name"] = uploaded_any.name
+                st.success(f"Successfully processed Excel file: {uploaded_any.name}")
+
+            else:
+                st.error("Unsupported file type. Please upload .csv, .xlsx or .xls.")
+
+        except Exception as e:
+            st.error(f"Error while processing file '{uploaded_any.name}': {e}")
+
+    else:
+        st.info("This same file has already been processed previously (not duplicating data).")
+
+
 
 
 # ======================================================================
