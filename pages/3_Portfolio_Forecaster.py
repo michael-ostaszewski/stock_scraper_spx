@@ -9,6 +9,8 @@ import numpy as np
 import hashlib, hmac
 import time
 from openai import OpenAI
+import io
+import re
 
 
 # ======================================================================
@@ -251,8 +253,6 @@ custom_html = f"""
 # ======================================================================
 # 6. Unified upload: CSV *or* XLSX (auto-transform for XLSX)
 # ======================================================================
-import io
-import re
 
 st.markdown("#### Upload a CSV or XLSX file with a list of stocks in your portfolio:")
 
