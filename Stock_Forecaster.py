@@ -401,9 +401,9 @@ else:
 
     st.markdown("### Today's 1-year analyst forecast for the S&P 500 Index")
     col1, col2, col3 = st.columns(3)
-    col1.metric("Median - low forecast", f"{med_low:.2f}%", delta=f"{delta_low:+.2f}%" if delta_low is not None else "N/A")
-    col2.metric("Median - average forecasts", f"{med_median:.2f}%", delta=f"{delta_median:+.2f}%" if delta_median is not None else "N/A")
-    col3.metric("Median - high forecast", f"{med_high:.2f}%", delta=f"{delta_high:+.2f}%" if delta_high is not None else "N/A")
+    col1.metric("Average - low forecast", f"{med_low:.2f}%", delta=f"{delta_low:+.2f}%" if delta_low is not None else "N/A")
+    col2.metric("Average - median forecasts", f"{med_median:.2f}%", delta=f"{delta_median:+.2f}%" if delta_median is not None else "N/A")
+    col3.metric("Average - high forecast", f"{med_high:.2f}%", delta=f"{delta_high:+.2f}%" if delta_high is not None else "N/A")
 
     # st.write("")
     # st.write("")
