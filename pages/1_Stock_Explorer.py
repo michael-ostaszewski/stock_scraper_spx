@@ -1118,6 +1118,24 @@ st.markdown("""
     </p>
 """, unsafe_allow_html=True)
 
+st.markdown("<hr>", unsafe_allow_html=True)
+
+st.markdown("""\
+Please note: Investing involves risk and you may lose some or all of your capital.  
+This site is provided for informational purposes only and does not constitute financial advice.
+""")
+
+st.markdown("""
+    <p style="font-size: 12px; text-align: left; color: gray;">
+        © 2025 Michał Ostaszewski<br>
+        App source code licensed under the MIT License.<br>
+        All data used in this app is licensed under 
+        <a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" style="color: gray;">Creative Commons BY-NC 4.0</a>.<br>
+        See the <a href="https://github.com/TwojeRepozytorium" target="_blank" style="color: gray;">GitHub repository</a> for full license details.<br>
+        ☕ Support the project: <a href="https://buymeacoffee.com/michal.dev" target="_blank" style="color: gray;">buymeacoffee.com/michal.dev</a>
+    </p>
+""", unsafe_allow_html=True)
+
 
 
 
