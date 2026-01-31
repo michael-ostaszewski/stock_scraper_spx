@@ -11,7 +11,7 @@ import time
 from openai import OpenAI
 import io
 import re
-
+from plotly.subplots import make_subplots
 
 # ======================================================================
 # 1. Global CSS styles for buttons
@@ -106,12 +106,16 @@ if "last_uploaded_file_name" not in st.session_state:
 # ======================================================================
 st.title("Portfolio Forecaster")
 st.markdown("""
-This tab is used to analyze stock price forecasts in your portfolio.
+This tab helps you analyze stock price forecasts for your portfolio.
 
-1. You can upload a **CSV file** with a list of your stocks (see the detailed instruction how to prepare CSV file below).
-2. **Or** add stocks manually using the form below.
+1. Upload a CSV file with your stock list (see the detailed instructions below), **or** add stocks manually using the form.
+2. To include your full XTB history, export the report from **Account History → Export → Range (All) → Format: Excel (.xlsx)**, then upload the downloaded file **unchanged**.
+3. After entering data, the app will automatically show analysis and charts for your portfolio.
 
-After entering data, you will automatically see analysis and charts for your portfolio. """)
+Notes:
+- Your data is **not stored** anywhere; it is used only in your current session.
+- The analysis currently supports **U.S. stocks only**, limited to the **Russell 1000** universe.
+""")
 
 st.markdown("<hr>", unsafe_allow_html=True)
 # ======================================================================
@@ -209,52 +213,11 @@ custom_html = f"""
 </details>
 """
 
-# # ======================================================================
-# # 6. CSV file upload section
-# # ======================================================================
-# st.markdown("#### Upload a CSV file with a list of stocks in your portfolio:")
-# st.markdown(custom_html, unsafe_allow_html=True)
-# uploaded_file = st.file_uploader("", type=["csv"])
-# if uploaded_file is not None:
-#     # If it's a new file, merge it with the portfolio; otherwise ignore
-#     if uploaded_file.name != st.session_state["last_uploaded_file_name"]:
-#         try:
-#             csv_df = pd.read_csv(uploaded_file, delimiter=';')
-#             # Make sure we have all required columns (or add them empty)
-#             for col in ["Symbol", "Type", "Volume", "Open price", "Open time"]:
-#                 if col not in csv_df.columns:
-#                     csv_df[col] = ""
-#
-#             st.session_state["user_portfolio_df"] = pd.concat(
-#                 [st.session_state["user_portfolio_df"], csv_df],
-#                 ignore_index=True
-#             ).fillna("")
-#             st.session_state["last_uploaded_file_name"] = uploaded_file.name
-#             st.success(f"Successfully loaded CSV file: {uploaded_file.name}")
-#         except Exception as e:
-#             st.error(f"Error loading CSV file: {e}")
-#     else:
-#         st.info("This same CSV file has already been processed previously (not duplicating data).")
-#
-# # st.markdown("<hr>", unsafe_allow_html=True)
-#
-# st.markdown(
-#     """
-#     <div style="display: flex; align-items: center; margin: 20px 0;">
-#       <hr style="flex: 1; border: none; border-top: 1px solid #ccc;">
-#       <span style="margin: 0 10px; color: #888; font-size: 14px;">or/and</span>
-#       <hr style="flex: 1; border: none; border-top: 1px solid #ccc;">
-#     </div>
-#     """,
-#     unsafe_allow_html=True
-# )
-
-
 # ======================================================================
 # 6. Unified upload: CSV *or* XLSX (auto-transform for XLSX)
 # ======================================================================
 
-st.markdown("#### Upload a CSV or XLSX file with a list of stocks in your portfolio:")
+st.markdown("#### Upload XLSX file from your XTB with full history of your portfolio:")
 
 @st.cache_data
 def _load_example_portfolio():  # zachowujemy poprzednią pomocniczą funkcję
@@ -417,8 +380,11 @@ if uploaded_any is not None:
                 st.session_state["last_uploaded_file_name"] = uploaded_any.name
                 st.success(f"Successfully loaded CSV file: {uploaded_any.name}")
 
+            # elif name_lower.endswith(".xlsx") or name_lower.endswith(".xls"):
             elif name_lower.endswith(".xlsx") or name_lower.endswith(".xls"):
-                # XLSX/XLS → transformacja do docelowych kolumn
+                # zapisz bytes raportu XTB do session_state (będzie używane w sekcjach poniżej)
+                st.session_state["xtb_report_bytes"] = uploaded_any.getvalue()
+            #     # XLSX/XLS → transformacja do docelowych kolumn
                 df_x = _process_xlsx_to_df(uploaded_any)
                 # dopinamy (floaty zostają; reszta appki już radzi sobie z konwersjami)
                 st.session_state["user_portfolio_df"] = pd.concat(
@@ -436,8 +402,6 @@ if uploaded_any is not None:
 
     else:
         st.info("This same file has already been processed previously (not duplicating data).")
-
-
 
 
 # ======================================================================
@@ -616,101 +580,14 @@ if total_investment != 0:
 else:
     percent_diff = 0
 
+st.header("Portfolio Summary and Allocation")
+            # st.write("Net value perspective (BUY - SELL).")
+
 # Display 3 metrics in columns:
 col1, col2, col3 = st.columns(3)
 col1.metric("Number of stocks in portfolio", f"{num_unique_tickers}")
 col2.metric("Investment amount", f"{total_investment:.2f} USD")
 col3.metric("Current investment value", f"{total_current_value:.2f} USD", delta=f"{percent_diff:+.2f}%")
-
-
-with st.expander("History of the current portfolio value over time"):
-
-    # 1. Load data from your full database (instead of scoring/filtered_data):
-    df_all = load_forecast_data()
-
-    # 2. Copy the data from the portfolio (what is in session_state).
-    portfolio_df = st.session_state["user_portfolio_df"].copy()
-    portfolio_df["Symbol"] = portfolio_df["Symbol"].str.upper()
-
-    # 3. Convert BUY to positive volume, SELL to negative:
-    def net_volume(row):
-        t = str(row["Type"]).upper()
-        vol_str = str(row["Volume"]).replace(",", ".")
-        try:
-            vol = float(vol_str)
-        except ValueError:
-            vol = 0.0
-        return vol if t == "BUY" else (-abs(vol))
-
-    portfolio_df["Volume"] = portfolio_df.apply(net_volume, axis=1)
-
-    # 4. Group to get total (net) volume for each Symbol:
-    portfolio_agg = (
-        portfolio_df
-        .groupby("Symbol", as_index=False)["Volume"]
-        .sum()
-        .rename(columns={"Volume": "NetVolume"})
-    )
-
-    # 5. Prepare historical data from df_all:
-    df_all["Stock"] = df_all["Stock"].str.upper()
-    df_all["Date of record"] = pd.to_datetime(df_all["Date of record"], errors="coerce")
-
-    df_all["Price"] = (
-        df_all["Price"]
-        .astype(str)
-        .str.replace(",", ".")
-    )
-    df_all["Price"] = pd.to_numeric(df_all["Price"], errors="coerce").fillna(0)
-
-    # 6. Filter only those tickers that are in the portfolio (by NetVolume):
-    df_all_portfolio = df_all[df_all["Stock"].isin(portfolio_agg["Symbol"])].copy()
-
-    # 7. For each (Date, Stock), take the LAST entry of that day (if multiple entries exist):
-    df_daily = (
-        df_all_portfolio
-        .sort_values(["Stock", "Date of record"])
-        .groupby(["Date of record", "Stock"], as_index=False)
-        .last()
-    )
-
-    # 8. Merge df_daily with NetVolume to have the number of shares for each stock:
-    merged = df_daily.merge(
-        portfolio_agg,
-        left_on="Stock",
-        right_on="Symbol",
-        how="left"
-    )
-
-    # 9. Calculate value (Price * NetVolume):
-    merged["PortfolioValue"] = merged["Price"] * merged["NetVolume"]
-
-    # 10. Sum all stocks' values for each day:
-    daily_portfolio = (
-        merged
-        .groupby("Date of record", as_index=False)["PortfolioValue"]
-        .sum()
-        .sort_values("Date of record")
-    )
-
-    # 11. Create an area chart (in green):
-    fig = px.area(
-        daily_portfolio,
-        x="Date of record",
-        y="PortfolioValue",
-        labels={"PortfolioValue": "Portfolio value (USD)", "Date of record": ""},
-        color_discrete_sequence=["green"]
-    )
-
-    # Limit the Y-axis range to ±20% of the current portfolio value:
-    if not daily_portfolio.empty:
-        current_value = daily_portfolio["PortfolioValue"].iloc[-1]
-        y_min = current_value * 0.8
-        y_max = current_value * 1.2
-        fig.update_yaxes(range=[y_min, y_max])
-
-    # 12. Display the chart
-    st.plotly_chart(fig, use_container_width=True)
 
 
 # ======================================================================
@@ -747,9 +624,6 @@ if not user_df.empty and {"Symbol", "Type", "Volume", "Open price"}.issubset(use
             st.info("All positions in your portfolio have 0 or negative value (e.g., SELL>BUY). No data to chart.")
         else:
             portfolio_grouped["Invested"] = portfolio_grouped["Invested"].round(2)
-
-            st.header("Portfolio Allocation")
-            # st.write("Net value perspective (BUY - SELL).")
 
             fig_pie = go.Figure(
                 data=[go.Pie(
@@ -862,10 +736,10 @@ else:
         wa_median = (merged["weight"] * merged["Median Forecast Percent"]).sum()
         wa_high   = (merged["weight"] * merged["High Forecast Percent"]).sum()
 
-        c1,c2,c3 = st.columns(3)
-        c1.metric("Median – Low Forecast",    f"{wa_low:.2f}%")
-        c2.metric("Median – Median Forecast", f"{wa_median:.2f}%")
-        c3.metric("Median – High Forecast",   f"{wa_high:.2f}%")
+        r1c1, r1c2, r1c3 = st.columns(3)
+        r1c1.metric("Median – Low Forecast",    f"{wa_low:.2f}%")
+        r1c2.metric("Median – Median Forecast", f"{wa_median:.2f}%")
+        r1c3.metric("Median – High Forecast",   f"{wa_high:.2f}%")
 
     # ---------- B) Select box with 5 modes ---------------------------------
     view_mode = st.selectbox(
@@ -988,6 +862,1259 @@ else:
     st.plotly_chart(fig, use_container_width=True)
 
 
+
+# ============================================================
+#   NEW SECTION 1: CASH OPERATION HISTORY (XTB)  [FIXED]
+#   - deposit sum includes TRANSFER-in (currency conversions)
+#   - XIRR uses deposits+transfers+withdrawals as external flows
+#   - holdings include initial positions opened before the range
+#   - Free-funds Interest is displayed (already included in equity)
+# ============================================================
+
+st.markdown("---")
+st.header("Cash operations and return (XTB)")
+
+# ---- helpers ----
+def _xtb_find_sheet(sheet_names, must_have_keywords):
+    must = [m.lower() for m in must_have_keywords]
+    for s in sheet_names:
+        low = s.lower()
+        if all(m in low for m in must):
+            return s
+    return None
+
+@st.cache_data(show_spinner=False)
+def _xtb_read_cash_ops(raw_bytes: bytes) -> pd.DataFrame:
+    xls = pd.ExcelFile(io.BytesIO(raw_bytes), engine="openpyxl")
+    sh = _xtb_find_sheet(xls.sheet_names, ["cash", "operation"])
+    if not sh:
+        raise ValueError(f"No CASH OPERATION HISTORY sheet found. Sheets: {xls.sheet_names}")
+
+    df = pd.read_excel(io.BytesIO(raw_bytes), sheet_name=sh, engine="openpyxl", skiprows=10)
+
+    # usuń puste / Total
+    if "Type" in df.columns:
+        df = df[df["Type"].notna()].copy()
+
+    # konwersje
+    df["Time"] = pd.to_datetime(df.get("Time"), errors="coerce")
+    df = df.dropna(subset=["Time"]).copy()
+
+    df["Amount"] = pd.to_numeric(df.get("Amount"), errors="coerce").fillna(0.0)
+    df["Type"] = df.get("Type").astype(str)
+
+    # normy do porównań
+    df["Type_norm"] = df["Type"].astype(str).str.strip().str.lower()
+    df["Date"] = df["Time"].dt.normalize()
+
+    return df
+
+def _xnpv(rate: float, cashflows):
+    t0 = cashflows[0][0]
+    total = 0.0
+    for d, cf in cashflows:
+        years = (d - t0).days / 365.0
+        total += cf / ((1.0 + rate) ** years)
+    return total
+
+def _xirr(cashflows, guess=0.1):
+    amts = [a for _, a in cashflows]
+    if not (any(a < 0 for a in amts) and any(a > 0 for a in amts)):
+        return None
+
+    rate = guess
+    for _ in range(100):
+        t0 = cashflows[0][0]
+        f = 0.0
+        df = 0.0
+        for d, cf in cashflows:
+            t = (d - t0).days / 365.0
+            denom = (1.0 + rate) ** t
+            f += cf / denom
+            df += -t * cf / denom / (1.0 + rate)
+
+        if abs(f) < 1e-8:
+            return rate
+        if df == 0 or not np.isfinite(df):
+            break
+
+        new_rate = rate - f / df
+        if new_rate <= -0.9999 or not np.isfinite(new_rate):
+            break
+        if abs(new_rate - rate) < 1e-10:
+            return new_rate
+        rate = new_rate
+
+    # secant fallback
+    r0, r1 = -0.5, guess
+    f0 = _xnpv(r0, cashflows)
+    f1 = _xnpv(r1, cashflows)
+    for _ in range(200):
+        if f1 == f0:
+            return None
+        r2 = r1 - f1 * (r1 - r0) / (f1 - f0)
+        if r2 <= -0.9999 or not np.isfinite(r2):
+            r2 = (r1 + r0) / 2.0
+        f2 = _xnpv(r2, cashflows)
+        if abs(f2) < 1e-8:
+            return r2
+        r0, f0 = r1, f1
+        r1, f1 = r2, f2
+
+    return None
+
+
+# ---- main ----
+raw_xtb = st.session_state.get("xtb_report_bytes", None)
+if not raw_xtb:
+    st.info("Upload the full XTB XLSX report first (the file with multiple sheets).")
+else:
+    try:
+        df_cash = _xtb_read_cash_ops(raw_xtb)
+    except Exception as e:
+        st.error(f"Could not read CASH OPERATION HISTORY: {e}")
+        df_cash = pd.DataFrame()
+
+    if df_cash.empty:
+        st.warning("No cash operation data found in the report.")
+    else:
+        min_d = df_cash["Date"].min().date()
+        max_d = df_cash["Date"].max().date()
+
+        # date selectors
+        default_from = max(min_d, (max_d - datetime.timedelta(days=90)))
+        col_a, col_b = st.columns(2)
+        with col_a:
+            d_from = st.date_input("Date from", value=default_from, min_value=min_d, max_value=max_d, key="xtb_cash_from")
+        with col_b:
+            d_to = st.date_input("Date to", value=max_d, min_value=min_d, max_value=max_d, key="xtb_cash_to")
+
+        if d_from > d_to:
+            d_from, d_to = d_to, d_from
+
+        start_day  = pd.Timestamp(d_from).normalize()
+        end_day    = pd.Timestamp(d_to).normalize()
+        start_prev = start_day - pd.Timedelta(days=1)
+
+        df_period = df_cash[(df_cash["Date"] >= start_day) & (df_cash["Date"] <= end_day)].copy()
+
+        # ---- sums requested (fixed) ----
+        # Deposit sum = DEPOSIT + TRANSFER that increase USD funds (inflows only)
+        inflow_mask = (
+            df_period["Type_norm"].isin(["deposit", "transfer"])
+            & (df_period["Amount"] > 0)
+        )
+        deposits_sum = df_period.loc[inflow_mask, "Amount"].sum()
+
+        dividends_sum = df_period.loc[
+            df_period["Type_norm"].str.contains("divid", na=False),
+            "Amount"
+        ].sum()
+
+        withholding_tax_sum = df_period.loc[
+            df_period["Type_norm"].eq("withholding tax"),
+            "Amount"
+        ].sum()  # zwykle ujemne
+
+        # free funds interest (display only; it's already part of equity via cash balance)
+        ff_interest_sum = df_period.loc[df_period["Type_norm"].eq("free-funds interest"), "Amount"].sum()
+        ff_interest_tax = df_period.loc[df_period["Type_norm"].eq("free-funds interest tax"), "Amount"].sum()
+        ff_interest_net = ff_interest_sum + ff_interest_tax
+
+        # withdrawals (net)
+        withdrawals_sum = df_period.loc[df_period["Type_norm"].eq("withdrawal"), "Amount"].sum()  # zwykle ujemne
+
+        # ---- equity time series ----
+        # cash balance daily from ALL ops (includes purchases/sales/fees/dividends/interest etc.)
+        df_cash_daily = df_cash.groupby("Date", as_index=True)["Amount"].sum().sort_index()
+        full_idx = pd.date_range(df_cash_daily.index.min(), end_day, freq="D")
+        cash_balance_full = df_cash_daily.reindex(full_idx, fill_value=0.0).cumsum()
+
+        idx_eval = pd.date_range(start_prev, end_day, freq="D")
+        cash_eval = cash_balance_full.reindex(idx_eval, method="ffill").fillna(0.0)
+
+        # ---- prices daily from your database ----
+        df_all_prices = load_forecast_data().copy()
+        if "Date of record" not in df_all_prices.columns:
+            st.warning("No 'Date of record' in your price database, cannot compute return/XIRR.")
+            df_all_prices["Date of record"] = pd.NaT
+
+        df_all_prices["Date of record"] = pd.to_datetime(df_all_prices["Date of record"], errors="coerce")
+        df_all_prices["Date"] = df_all_prices["Date of record"].dt.normalize()
+
+        df_all_prices["Stock"] = df_all_prices["Stock"].astype(str).str.strip().str.upper()
+        df_all_prices["Stock"] = df_all_prices["Stock"].str.replace(r"\.US$", "", regex=True)
+
+        df_all_prices["Price"] = pd.to_numeric(
+            df_all_prices["Price"].astype(str).str.replace(",", "."),
+            errors="coerce"
+        ).fillna(0.0)
+
+        df_px_daily = (
+            df_all_prices
+            .dropna(subset=["Date", "Stock"])
+            .sort_values(["Stock", "Date of record"])
+            .groupby(["Date", "Stock"], as_index=False)
+            .last()
+        )
+        px_pivot = df_px_daily.pivot(index="Date", columns="Stock", values="Price").sort_index()
+
+        # ---- positions from XTB ----
+        @st.cache_data(show_spinner=False)
+        def _xtb_read_positions(raw_bytes: bytes):
+            xls = pd.ExcelFile(io.BytesIO(raw_bytes), engine="openpyxl")
+            sh_closed = _xtb_find_sheet(xls.sheet_names, ["closed", "position"])
+            sh_open   = _xtb_find_sheet(xls.sheet_names, ["open", "position"])
+            if not sh_closed:
+                raise ValueError(f"No CLOSED POSITION HISTORY sheet found. Sheets: {xls.sheet_names}")
+
+            df_closed = pd.read_excel(io.BytesIO(raw_bytes), sheet_name=sh_closed, engine="openpyxl", skiprows=12)
+            df_open = None
+            if sh_open:
+                df_open = pd.read_excel(io.BytesIO(raw_bytes), sheet_name=sh_open, engine="openpyxl", skiprows=10)
+            return df_closed, df_open
+
+        def _norm_symbol(s):
+            if pd.isna(s):
+                return ""
+            s = str(s).strip().upper()
+            s = re.sub(r"\.US$", "", s, flags=re.I)
+            return s
+
+        def _prep_positions(df_closed, df_open, allowed_symbols: set):
+            dc = df_closed[["Symbol", "Type", "Volume", "Open time", "Close time"]].copy()
+            dc["Open time"]  = pd.to_datetime(dc["Open time"], errors="coerce")
+            dc["Close time"] = pd.to_datetime(dc["Close time"], errors="coerce")
+            dc = dc.dropna(subset=["Open time", "Close time"]).copy()
+
+            dc["Symbol"] = dc["Symbol"].map(_norm_symbol)
+            dc = dc[dc["Symbol"] != ""].copy()
+
+            dc["signed_volume"] = pd.to_numeric(dc["Volume"], errors="coerce").fillna(0.0) * (
+                dc["Type"].astype(str).str.upper().map({"BUY": 1, "SELL": -1}).fillna(1)
+            )
+            dc["open_date"] = dc["Open time"].dt.normalize()
+            dc["close_date"] = dc["Close time"].dt.normalize()
+
+            if df_open is not None and not df_open.empty:
+                do = df_open[["Symbol", "Type", "Volume", "Open time"]].copy()
+                do["Open time"] = pd.to_datetime(do["Open time"], errors="coerce")
+                do = do.dropna(subset=["Open time"]).copy()
+
+                do["Symbol"] = do["Symbol"].map(_norm_symbol)
+                do = do[do["Symbol"] != ""].copy()
+
+                do["signed_volume"] = pd.to_numeric(do["Volume"], errors="coerce").fillna(0.0) * (
+                    do["Type"].astype(str).str.upper().map({"BUY": 1, "SELL": -1}).fillna(1)
+                )
+                do["open_date"] = do["Open time"].dt.normalize()
+                do["close_date"] = pd.NaT
+
+                dp = pd.concat(
+                    [dc[["Symbol", "signed_volume", "open_date", "close_date"]],
+                     do[["Symbol", "signed_volume", "open_date", "close_date"]]],
+                    ignore_index=True
+                )
+            else:
+                dp = dc[["Symbol", "signed_volume", "open_date", "close_date"]].copy()
+
+            before = dp["Symbol"].nunique()
+            dp = dp[dp["Symbol"].isin(allowed_symbols)].copy()
+            after = dp["Symbol"].nunique()
+            dropped = before - after
+            return dp, dropped
+
+        def _build_daily_holdings(dp, start_day, end_day):
+            """
+            Holdings at END OF EACH DAY.
+            Includes initial holdings opened before start_day and not closed before start_day.
+            """
+            idx = pd.date_range(start_day, end_day, freq="D")
+
+            # initial holdings at start_day (positions already open before start_day)
+            init_mask = (dp["open_date"] < start_day) & (dp["close_date"].isna() | (dp["close_date"] >= start_day))
+            init = dp.loc[init_mask].groupby("Symbol")["signed_volume"].sum()
+
+            # deltas within the window
+            ev_open = (
+                dp.loc[(dp["open_date"] >= start_day) & (dp["open_date"] <= end_day)]
+                .groupby(["open_date", "Symbol"])["signed_volume"].sum()
+                .reset_index(name="Delta")
+                .rename(columns={"open_date": "Date"})
+            )
+
+            dp_close = dp.dropna(subset=["close_date"]).copy()
+            ev_close = (
+                dp_close.loc[(dp_close["close_date"] >= start_day) & (dp_close["close_date"] <= end_day)]
+                .groupby(["close_date", "Symbol"])["signed_volume"].sum()
+                .reset_index(name="Delta")
+                .rename(columns={"close_date": "Date"})
+            )
+            ev_close["Delta"] = -ev_close["Delta"]
+
+            events = pd.concat([ev_open, ev_close], ignore_index=True)
+
+            wide = (
+                events.pivot_table(index="Date", columns="Symbol", values="Delta", aggfunc="sum")
+                .reindex(idx)
+                .fillna(0.0)
+            )
+
+            holdings = wide.cumsum()
+
+            # add initial holdings to all days
+            for sym, val in init.items():
+                if sym in holdings.columns:
+                    holdings[sym] = holdings[sym] + float(val)
+                else:
+                    holdings[sym] = float(val)
+
+            holdings = holdings.reindex(idx).fillna(0.0)
+            holdings.index.name = "Date"
+            return holdings.sort_index(axis=1)
+
+        allowed = set(df_all_prices["Stock"].dropna().unique().tolist())
+
+        try:
+            df_closed, df_open = _xtb_read_positions(raw_xtb)
+            dp, dropped_cnt = _prep_positions(df_closed, df_open, allowed)
+        except Exception as e:
+            st.error(f"Could not read CLOSED/OPEN position sheets: {e}")
+            dp = pd.DataFrame()
+
+        if dp.empty:
+            st.warning("No positions found (or no matching symbols in your price database). Return/XIRR cannot be computed.")
+        else:
+            if dropped_cnt > 0:
+                st.info(f"Skipped {dropped_cnt} instruments not found in your price database (e.g. crypto, indices).")
+
+            holdings_eval = _build_daily_holdings(dp, start_prev, end_day)
+
+            px_eval = px_pivot.reindex(holdings_eval.index).ffill().fillna(0.0)
+
+            common_cols = [c for c in holdings_eval.columns if c in px_eval.columns]
+            missing_prices = sorted(list(set(holdings_eval.columns) - set(common_cols)))
+
+            mv = (holdings_eval[common_cols] * px_eval[common_cols]).sum(axis=1)
+            equity = cash_eval + mv
+
+            start_equity = float(equity.iloc[0])   # end of start_prev
+            end_equity   = float(equity.iloc[-1])  # end of end_day
+
+            # ---- simple return (fixed: include transfer + withdrawal in net_contrib) ----
+            ext_types = ["deposit", "transfer", "withdrawal"]
+            net_contrib = df_period.loc[df_period["Type_norm"].isin(ext_types), "Amount"].sum()  # net cash into the account
+
+            profit = end_equity - start_equity - float(net_contrib)
+            denom = start_equity + float(net_contrib)
+            simple_return = (profit / denom) if denom != 0 else np.nan
+
+            # ---- XIRR (fixed: include transfer, correct dates) ----
+            flows = []
+            flows.append((start_prev.date(), -start_equity))
+
+            ext = df_period[df_period["Type_norm"].isin(ext_types)].copy()
+            # Flow convention: investor perspective cashflow = -Amount (Amount>0 is money into account)
+            ext["Flow"] = -ext["Amount"].astype(float)
+
+            ext_daily = (
+                ext.assign(_d=ext["Date"].dt.date)
+                .groupby("_d", as_index=False)["Flow"]
+                .sum()
+                .rename(columns={"_d": "Date"})
+                .sort_values("Date")
+            )
+
+            for row in ext_daily.itertuples(index=False):
+                dt = row.Date
+                if not isinstance(dt, datetime.date):
+                    dt = pd.Timestamp(dt).date()
+                flows.append((dt, float(row.Flow)))
+
+            flows.append((end_day.date(), +end_equity))
+
+            irr = _xirr(flows, guess=0.1)
+
+            # ---- UI metrics ----
+            # r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+            # r1c1.metric("Sum of deposits (Deposit + Transfer-in)", f"{deposits_sum:,.2f} USD")
+            # r1c2.metric("Sum of dividends", f"{dividends_sum:,.2f} USD")
+            # r1c3.metric("Dividend withholding tax (net)", f"{(-withholding_tax_sum):,.2f} USD")
+            # r1c4.metric("Free-funds interest (net)", f"{ff_interest_net:,.2f} USD")
+            #
+            # r2c1, r2c2 = st.columns(2)
+            # r2c1.metric("Simple return", f"{(simple_return*100):.2f}%" if np.isfinite(simple_return) else "n/a")
+            # r2c2.metric("XIRR (money-weighted)", f"{(irr*100):.2f}%" if irr is not None else "n/a")
+
+            # ---- UI metrics (3-column layout) ----
+
+            # Row 1: cash ops summary
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Sum of deposits (Deposit + Transfer-in)", f"{deposits_sum:,.2f} USD")
+            c2.metric("Sum of dividends", f"{dividends_sum:,.2f} USD")
+            c3.metric("Dividend withholding tax (net)", f"{(-withholding_tax_sum):,.2f} USD")
+
+            # Row 2: interest + equity endpoints
+            c4, c5, c6 = st.columns(3)
+            c4.metric("Free-funds interest (net)", f"{ff_interest_net:,.2f} USD")
+            c5.metric(f"Start equity (end of {start_prev.date()})", f"{start_equity:,.2f} USD")
+            c6.metric(f"End equity (end of {end_day.date()})", f"{end_equity:,.2f} USD")
+
+            # Row 3: returns
+            c7, c8, c9 = st.columns(3)
+            c7.metric("Net external cashflow (deposit+transfer+withdrawal)", f"{float(net_contrib):,.2f} USD")
+            c8.metric("Simple return", f"{(simple_return * 100):.2f}%" if np.isfinite(simple_return) else "n/a")
+            c9.metric("XIRR (money-weighted)", f"{(irr * 100):.2f}%" if irr is not None else "n/a")
+
+            with st.expander("Details (optional)"):
+                st.write(f"Start equity (end of {start_prev.date()}): {start_equity:,.2f} USD")
+                st.write(f"End equity (end of {end_day.date()}): {end_equity:,.2f} USD")
+                st.write(f"Net external cashflow in period (deposit+transfer+withdrawal): {net_contrib:,.2f} USD")
+
+                if missing_prices:
+                    st.warning(
+                        "Missing prices for: "
+                        + ", ".join(missing_prices[:30])
+                        + (" ..." if len(missing_prices) > 30 else "")
+                    )
+
+                st.markdown("**Daily external flows used for XIRR**")
+                st.dataframe(ext_daily, use_container_width=True)
+
+                st.markdown("**Cash operations (latest 200 in selected range)**")
+                cols_show = [c for c in ["Time", "Type", "Symbol", "Amount", "Comment"] if c in df_period.columns]
+                show_ops = df_period[cols_show].sort_values("Time", ascending=False).head(200)
+                st.dataframe(show_ops, use_container_width=True)
+
+
+
+# ============================================================
+#   NEW SECTION 2: HOLDINGS TIMELINE (day-by-day)
+#   - when you held which stock and how many shares
+# ============================================================
+
+st.markdown("---")
+st.header("Holdings timeline (XTB)")
+
+raw_xtb = st.session_state.get("xtb_report_bytes", None)
+if not raw_xtb:
+    st.info("Upload the full XTB XLSX report first (the file with multiple sheets).")
+else:
+    # Reuse date range from Section 1 if present, else make a local selector
+    d_from = st.session_state.get("xtb_cash_from", None)
+    d_to   = st.session_state.get("xtb_cash_to", None)
+
+    # if user did not open Section 1 yet, fallback
+    if not isinstance(d_from, datetime.date) or not isinstance(d_to, datetime.date):
+        st.caption("Pick date range for holdings timeline")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            d_from = st.date_input("Date from (timeline)", value=datetime.date.today() - datetime.timedelta(days=90), key="xtb_hold_from")
+        with col_b:
+            d_to = st.date_input("Date to (timeline)", value=datetime.date.today(), key="xtb_hold_to")
+
+    if d_from > d_to:
+        d_from, d_to = d_to, d_from
+
+    start_day = pd.Timestamp(d_from).normalize()
+    end_day   = pd.Timestamp(d_to).normalize()
+
+    # --- read positions again (cached in Section 1, but safe to call) ---
+    try:
+        # helpers from Section 1 should already exist if you pasted both sections in one file
+        df_closed, df_open = _xtb_read_positions(raw_xtb)
+    except Exception as e:
+        st.error(f"Could not read CLOSED/OPEN position sheets: {e}")
+        df_closed, df_open = pd.DataFrame(), pd.DataFrame()
+
+    if df_closed.empty and (df_open is None or df_open.empty):
+        st.warning("No positions found in the XTB report.")
+    else:
+        # allowed symbols only from your price database (stock universe)
+        df_all_prices = load_forecast_data().copy()
+        df_all_prices["Stock"] = df_all_prices["Stock"].astype(str).str.strip().str.upper()
+        df_all_prices["Stock"] = df_all_prices["Stock"].str.replace(r"\.US$", "", regex=True)
+        allowed = set(df_all_prices["Stock"].dropna().unique().tolist())
+
+        dp, dropped_cnt = _prep_positions(df_closed, df_open, allowed)
+
+        if dp.empty:
+            st.warning("No matching instruments found in your price database (timeline cannot be built).")
+        else:
+            if dropped_cnt > 0:
+                st.info(f"Skipped {dropped_cnt} instruments not found in your price database (e.g. crypto, indices).")
+
+            holdings = _build_daily_holdings(dp, start_day, end_day)
+
+            EPS = 0.001
+
+            # Utnij mikro-resztki wolumenu do zera
+            holdings = holdings.where(holdings.abs() >= EPS, 0.0)
+
+            # (opcjonalnie) usuń tickery, które po tym ucięciu są zerowe przez cały okres
+            holdings = holdings.loc[:, (holdings.abs().sum(axis=0) >= EPS)]
+
+            holdings_all = holdings.copy()  # pełny zestaw do sumy Total
+
+            # filter UI (optional): choose which tickers to show
+            all_syms = list(holdings.columns)
+            default_syms = all_syms[:min(15, len(all_syms))]
+            show_syms = st.multiselect(
+                "Tickers to display (optional):",
+                options=all_syms,
+                default=default_syms
+            )
+            if show_syms:
+                holdings = holdings[show_syms].copy()
+
+            # Build segments: one bar per constant-holding period
+            segments = []
+            idx = holdings.index
+
+            for sym in holdings.columns:
+                s = holdings[sym]
+                # points where holdings changes
+                change = s.ne(s.shift(1, fill_value=0))
+                change_dates = idx[change]
+
+                for i, seg_start in enumerate(change_dates):
+                    vol = float(s.loc[seg_start])
+                    if abs(vol) < EPS:
+                        continue
+                    seg_end = (change_dates[i + 1] - pd.Timedelta(days=1)) if (i + 1) < len(change_dates) else idx[-1]
+
+                    # px.timeline wants x_end, so add +1 day to make it inclusive
+                    segments.append({
+                        "Stock": sym,
+                        "Start": seg_start,
+                        "End": seg_end + pd.Timedelta(days=1),
+                        "Volume": vol
+                    })
+
+            seg_df = pd.DataFrame(segments)
+            if seg_df.empty:
+                st.info("No non-zero holdings in the selected date range.")
+            else:
+                st.caption("Bars are split whenever your position size changes. Volume is shown in hover.")
+                fig_hold = px.timeline(
+                    seg_df,
+                    x_start="Start",
+                    x_end="End",
+                    y="Stock",
+                    color="Stock",
+                    hover_data={
+                        "Stock": True,
+                        "Start": "|%Y-%m-%d",
+                        "End": "|%Y-%m-%d",
+                        "Volume": ":.4f"
+                    },
+                    title="When you held each stock (with daily position size)"
+                )
+                fig_hold.update_layout(
+                    height=600,
+                    showlegend=False,
+                    xaxis_title="Date",
+                    yaxis_title="Stock",
+                    dragmode="pan"
+                )
+                fig_hold.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,0.2)")
+                fig_hold.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.2)")
+
+                st.plotly_chart(fig_hold, use_container_width=True)
+
+                with st.expander("Daily holdings table (optional)"):
+                    st.dataframe(holdings.reset_index(), use_container_width=True)
+
+# ============================================================
+#   HOLDINGS MARKET VALUE (area) + CASH + BENCHMARKS
+#   Added benchmark mode:
+#   - Switch portfolio to benchmark + DCA (USD)
+#     (initial Total equity invested at start + all later deposits invested)
+# ============================================================
+
+st.markdown("---")
+st.subheader("Holdings market value over time")
+
+if "holdings_all" not in locals() or holdings_all.empty:
+    st.info("No holdings data available for this section. Make sure the Holdings timeline section runs first.")
+else:
+    # ----------------------------
+    # UI: slice selection
+    # ----------------------------
+    all_syms_for_value = list(holdings_all.columns)
+    default_subset = all_syms_for_value[:min(10, len(all_syms_for_value))]
+
+    selected_syms_value = st.multiselect(
+        "Tickers to highlight as a slice:",
+        options=all_syms_for_value,
+        default=default_subset,
+        key="mv_slice_syms"
+    )
+
+    # ----------------------------
+    # UI: benchmarks
+    # ----------------------------
+    bench_catalog = {
+        "S&P 500":            {"stooq": "^spx", "yfinance": "^GSPC"},
+        "Nasdaq Composite":   {"stooq": "^ndq", "yfinance": "^IXIC"},
+        "Nasdaq 100":         {"stooq": "^ndx", "yfinance": "^NDX"},
+        "Dow Jones":          {"stooq": "^dji", "yfinance": "^DJI"},
+        "Russell 2000 (ETF)": {"stooq": "iwm.us", "yfinance": "IWM"},
+    }
+
+    bcol1, bcol2, bcol3 = st.columns([1.2, 2.2, 1.2])
+    with bcol1:
+        bench_source = st.selectbox(
+            "Benchmark source:",
+            options=["Stooq (recommended)", "yfinance"],
+            index=0,
+            key="bench_source"
+        )
+        bench_source_key = "stooq" if bench_source.startswith("Stooq") else "yfinance"
+
+    with bcol2:
+        bench_selected = st.multiselect(
+            "Benchmarks to display:",
+            options=list(bench_catalog.keys()),
+            default=["S&P 500"],
+            key="bench_selected"
+        )
+
+    with bcol3:
+        base_mode = st.selectbox(
+            "Benchmark scale:",
+            options=[
+                "Switch portfolio to benchmark + DCA (USD)",
+                "DCA deposits into benchmark (USD)",
+                "Match portfolio start (USD)",
+                "0% = start",
+                "100 = start",
+            ],
+            index=0,
+            key="bench_base_mode"
+        )
+
+        # Normalizacja ma sens tylko przy trybach %/100
+        enable_norm = base_mode in ["0% = start", "100 = start"]
+        show_portfolio_norm = st.checkbox(
+            "Add portfolio normalized",
+            value=enable_norm,
+            disabled=not enable_norm,
+            key="bench_show_port_norm"
+        )
+
+    # ----------------------------
+    # helpers: benchmarks fetch
+    # ----------------------------
+    @st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+    def _load_benchmark_series(source_key: str, symbol: str, start_iso: str, end_iso: str) -> pd.Series:
+        start = pd.to_datetime(start_iso)
+        end = pd.to_datetime(end_iso)
+
+        if source_key == "stooq":
+            s_enc = urllib.parse.quote(symbol)
+            url = f"https://stooq.com/q/d/l/?s={s_enc}&i=d"
+            df = pd.read_csv(url)
+            if "Date" not in df.columns or "Close" not in df.columns:
+                raise ValueError(f"Unexpected Stooq format for {symbol}")
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+            df = df.dropna(subset=["Date"]).sort_values("Date")
+            df = df[(df["Date"] >= start) & (df["Date"] <= end)].copy()
+            s = pd.to_numeric(df["Close"], errors="coerce")
+            s.index = df["Date"].dt.normalize()
+            return s.dropna()
+
+        df = yf.download(
+            symbol,
+            start=start.strftime("%Y-%m-%d"),
+            end=(end + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+            interval="1d",
+            auto_adjust=True,
+            progress=False
+        )
+        if df is None or df.empty:
+            return pd.Series(dtype=float)
+
+        price_col = "Adj Close" if "Adj Close" in df.columns else "Close"
+        if price_col not in df.columns:
+            return pd.Series(dtype=float)
+
+        s = df[price_col]
+        if isinstance(s, pd.DataFrame):
+            s = s.iloc[:, 0]
+        s.index = pd.to_datetime(s.index).tz_localize(None).normalize()
+        return s.dropna()
+
+    def _normalize_series(s: pd.Series, mode: str) -> pd.Series:
+        s = s.dropna()
+        if s.empty:
+            return s
+        first = float(s.iloc[0])
+        if first == 0:
+            return pd.Series(index=s.index, data=np.nan)
+        if mode == "0% = start":
+            return (s / first - 1.0) * 100.0
+        return (s / first) * 100.0
+
+    def _anchor_to_portfolio_usd(bench_price: pd.Series, portfolio_start_usd: float) -> pd.Series:
+        bench_price = bench_price.dropna()
+        if bench_price.empty or portfolio_start_usd == 0:
+            return pd.Series(dtype=float)
+        b0 = float(bench_price.iloc[0])
+        if b0 == 0:
+            return pd.Series(dtype=float)
+        return portfolio_start_usd * (bench_price / b0)
+
+    def _dca_value_from_deposits(bench_price: pd.Series, deposit_daily: pd.Series, initial_usd: float = 0.0) -> pd.Series:
+        """
+        DCA: each day you deposit X, buy X/price shares at that day's close.
+        If initial_usd > 0, also buy initial_usd at the first day (same price as day 1).
+        """
+        bench_price = bench_price.reindex(deposit_daily.index).ffill().bfill()
+
+        shares = 0.0
+        vals = []
+
+        idx = deposit_daily.index
+        for i, dt in enumerate(idx):
+            px = float(bench_price.loc[dt]) if pd.notna(bench_price.loc[dt]) else 0.0
+            dep = float(deposit_daily.loc[dt]) if pd.notna(deposit_daily.loc[dt]) else 0.0
+
+            if px > 0:
+                if i == 0 and initial_usd > 0:
+                    shares += initial_usd / px
+                if dep > 0:
+                    shares += dep / px
+                vals.append(shares * px)
+            else:
+                vals.append(np.nan)
+
+        s_val = pd.Series(vals, index=idx).ffill()
+        return s_val
+
+    # ----------------------------
+    # 1) Portfolio holdings value from your price DB
+    # ----------------------------
+    df_prices = load_forecast_data().copy()
+    if "Date of record" not in df_prices.columns:
+        st.warning("No 'Date of record' in your price database, cannot compute market value.")
+    else:
+        df_prices["Date of record"] = pd.to_datetime(df_prices["Date of record"], errors="coerce")
+        df_prices["Date"] = df_prices["Date of record"].dt.normalize()
+
+        df_prices["Stock"] = df_prices["Stock"].astype(str).str.strip().str.upper()
+        df_prices["Stock"] = df_prices["Stock"].str.replace(r"\.US$", "", regex=True)
+
+        df_prices["Price"] = pd.to_numeric(
+            df_prices["Price"].astype(str).str.replace(",", "."),
+            errors="coerce"
+        ).fillna(0.0)
+
+        df_px_daily = (
+            df_prices
+            .dropna(subset=["Date", "Stock"])
+            .sort_values(["Stock", "Date of record"])
+            .groupby(["Date", "Stock"], as_index=False)
+            .last()
+        )
+
+        px_pivot = df_px_daily.pivot(index="Date", columns="Stock", values="Price").sort_index()
+
+        px_eval = px_pivot.reindex(holdings_all.index).ffill()
+        px_eval = px_eval.reindex(columns=holdings_all.columns).fillna(0.0)
+
+        mv_by_ticker = holdings_all.mul(px_eval)
+        holdings_mv = mv_by_ticker.sum(axis=1)
+
+        selected_mv = mv_by_ticker[selected_syms_value].sum(axis=1) if selected_syms_value else holdings_mv * 0.0
+        other_mv = (holdings_mv - selected_mv)
+
+        # ----------------------------
+        # 2) CASH and deposits from XTB cash ops
+        # ----------------------------
+        raw_xtb = st.session_state.get("xtb_report_bytes", None)
+        cash_eod = None
+        deposits_cum = None
+        deposit_daily = None
+
+        if raw_xtb is not None:
+            try:
+                df_cash_all = _xtb_read_cash_ops(raw_xtb).copy()
+                start_d = holdings_all.index.min()
+                end_d = holdings_all.index.max()
+
+                cash_daily_change = (
+                    df_cash_all.groupby("Date", as_index=True)["Amount"]
+                    .sum()
+                    .sort_index()
+                )
+                full_idx = pd.date_range(cash_daily_change.index.min(), end_d, freq="D")
+                cash_balance_full = cash_daily_change.reindex(full_idx, fill_value=0.0).cumsum()
+                cash_eod = cash_balance_full.reindex(holdings_all.index, method="ffill").fillna(0.0)
+
+                df_cash_range = df_cash_all[(df_cash_all["Date"] >= start_d) & (df_cash_all["Date"] <= end_d)].copy()
+
+                inflow_mask = (
+                    df_cash_range["Type_norm"].isin(["deposit", "transfer"])
+                    & (df_cash_range["Amount"] > 0)
+                )
+                deposit_daily = (
+                    df_cash_range.loc[inflow_mask]
+                    .groupby("Date", as_index=True)["Amount"]
+                    .sum()
+                    .reindex(holdings_all.index, fill_value=0.0)
+                )
+                deposits_cum = deposit_daily.cumsum()
+                # "Kapitał wniesiony" = startowe equity + dopłaty od startu okresu
+                # deposits_cum_anchored = portfolio_start_usd + deposits_cum
+
+
+            except Exception as e:
+                st.info(f"Could not compute cash/deposits from XTB report: {e}")
+
+        if cash_eod is None:
+            cash_eod = holdings_mv * 0.0
+        if deposit_daily is None:
+            deposit_daily = pd.Series(0.0, index=holdings_all.index)
+
+        total_equity = holdings_mv + cash_eod
+        portfolio_start_usd = float(total_equity.iloc[0]) if not total_equity.empty else 0.0
+
+        deposits_cum_anchored = None
+        if deposits_cum is not None:
+            deposits_cum_anchored = deposits_cum + portfolio_start_usd
+
+        # ----------------------------
+        # 3) Chart with secondary axis
+        # ----------------------------
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+        # Primary axis: stacked areas in USD
+        fig.add_trace(go.Scatter(
+            x=total_equity.index, y=selected_mv.values,
+            name="Selected holdings",
+            mode="lines",
+            stackgroup="one",
+            hovertemplate="%{x|%Y-%m-%d}<br>Selected: %{y:,.2f} USD<extra></extra>"
+        ), secondary_y=False)
+
+        fig.add_trace(go.Scatter(
+            x=total_equity.index, y=other_mv.values,
+            name="Other holdings",
+            mode="lines",
+            stackgroup="one",
+            hovertemplate="%{x|%Y-%m-%d}<br>Other: %{y:,.2f} USD<extra></extra>"
+        ), secondary_y=False)
+
+        fig.add_trace(go.Scatter(
+            x=total_equity.index, y=cash_eod.values,
+            name="Cash",
+            mode="lines",
+            stackgroup="one",
+            hovertemplate="%{x|%Y-%m-%d}<br>Cash: %{y:,.2f} USD<extra></extra>"
+        ), secondary_y=False)
+
+        fig.add_trace(go.Scatter(
+            x=total_equity.index, y=total_equity.values,
+            name="Total equity (USD)",
+            mode="lines",
+            hovertemplate="%{x|%Y-%m-%d}<br>Total equity: %{y:,.2f} USD<extra></extra>"
+        ), secondary_y=False)
+
+        if deposits_cum is not None:
+            fig.add_trace(go.Scatter(
+                x=deposits_cum.index, y=deposits_cum.values,
+                name="Cumulative deposits (USD)",
+                mode="lines",
+                hovertemplate="%{x|%Y-%m-%d}<br>Deposits cum: %{y:,.2f} USD<extra></extra>"
+            ), secondary_y=False)
+
+        if deposits_cum is not None:
+            fig.add_trace(go.Scatter(
+                x=deposits_cum_anchored.index,
+                y=deposits_cum_anchored.values,
+                name="Start equity + deposits (capital contributed)",
+                mode="lines",
+                hovertemplate="%{x|%Y-%m-%d}<br>Contributed capital: %{y:,.2f} USD<extra></extra>"
+            ), secondary_y=False)
+
+        # ----------------------------
+        # 4) Benchmarks
+        # ----------------------------
+        chart_start = total_equity.index.min().normalize()
+        chart_end = total_equity.index.max().normalize()
+        start_iso = chart_start.strftime("%Y-%m-%d")
+        end_iso = chart_end.strftime("%Y-%m-%d")
+
+        # Portfolio normalized (only in %/100 modes)
+        if show_portfolio_norm and base_mode in ["0% = start", "100 = start"]:
+            port_norm = _normalize_series(total_equity.copy(), base_mode)
+            port_norm = port_norm.reindex(total_equity.index).ffill().bfill()
+            fig.add_trace(go.Scatter(
+                x=port_norm.index, y=port_norm.values,
+                name="Portfolio (normalized)",
+                mode="lines",
+                hovertemplate="%{x|%Y-%m-%d}<br>Portfolio: %{y:.2f}<extra></extra>"
+            ), secondary_y=True)
+
+        # Benchmark lines
+        for bench_name in bench_selected:
+            sym = bench_catalog[bench_name][bench_source_key]
+            try:
+                s_price = _load_benchmark_series(bench_source_key, sym, start_iso, end_iso)
+                if s_price is None or s_price.empty:
+                    continue
+
+                s_price = s_price.reindex(total_equity.index).ffill().bfill()
+
+                if base_mode == "DCA deposits into benchmark (USD)":
+                    dca_usd = _dca_value_from_deposits(s_price, deposit_daily, initial_usd=0.0)
+                    fig.add_trace(go.Scatter(
+                        x=dca_usd.index, y=dca_usd.values,
+                        name=f"{bench_name} (DCA deposits)",
+                        mode="lines",
+                        hovertemplate="%{x|%Y-%m-%d}<br>" + bench_name + " DCA: %{y:,.2f} USD<extra></extra>"
+                    ), secondary_y=False)
+
+                elif base_mode == "Switch portfolio to benchmark + DCA (USD)":
+                    dca_full_usd = _dca_value_from_deposits(s_price, deposit_daily, initial_usd=portfolio_start_usd)
+                    fig.add_trace(go.Scatter(
+                        x=dca_full_usd.index, y=dca_full_usd.values,
+                        name=f"{bench_name} (switch + DCA)",
+                        mode="lines",
+                        hovertemplate="%{x|%Y-%m-%d}<br>" + bench_name + " switch+DCA: %{y:,.2f} USD<extra></extra>"
+                    ), secondary_y=False)
+
+                elif base_mode == "Match portfolio start (USD)":
+                    s_usd = _anchor_to_portfolio_usd(s_price, portfolio_start_usd)
+                    s_usd = s_usd.reindex(total_equity.index).ffill().bfill()
+                    fig.add_trace(go.Scatter(
+                        x=s_usd.index, y=s_usd.values,
+                        name=f"{bench_name} (anchored USD)",
+                        mode="lines",
+                        hovertemplate="%{x|%Y-%m-%d}<br>" + bench_name + ": %{y:,.2f} USD<extra></extra>"
+                    ), secondary_y=False)
+
+                else:
+                    s_norm = _normalize_series(s_price, base_mode)
+                    s_norm = s_norm.reindex(total_equity.index).ffill().bfill()
+                    fig.add_trace(go.Scatter(
+                        x=s_norm.index, y=s_norm.values,
+                        name=f"{bench_name} (norm)",
+                        mode="lines",
+                        hovertemplate="%{x|%Y-%m-%d}<br>" + bench_name + ": %{y:.2f}<extra></extra>"
+                    ), secondary_y=True)
+
+            except Exception:
+                continue
+
+        # ----------------------------
+        # Layout
+        # ----------------------------
+        fig.update_layout(
+            height=650,
+            hovermode="x unified",
+            legend=dict(
+                orientation="v",
+                yanchor="top",
+                y=1,
+                xanchor="left",
+                x=1.02
+            ),
+            margin=dict(t=30, r=140)
+        )
+        fig.update_xaxes(title_text="Date")
+        fig.update_yaxes(title_text="Value (USD)", secondary_y=False)
+
+        if base_mode in ["0% = start", "100 = start"]:
+            y2_title = "% change since start" if base_mode == "0% = start" else "Normalized (100 = start)"
+            fig.update_yaxes(title_text=y2_title, secondary_y=True, showgrid=False)
+        else:
+            fig.update_yaxes(title_text="", secondary_y=True, showgrid=False, showticklabels=False)
+
+        st.caption("Tip: Double-click a legend item to isolate it, or double-click again to show all.")
+        st.plotly_chart(fig, use_container_width=True)
+
+        # ------------------------------------------------------------
+        # Performance metrics vs benchmark (Switch + DCA mode) [FIXED: TWR]
+        # ------------------------------------------------------------
+        if base_mode == "Switch portfolio to benchmark + DCA (USD)" and bench_selected:
+            try:
+                bn = bench_selected[0]
+                sym = bench_catalog[bn][bench_source_key]
+
+                # price series
+                s_price = _load_benchmark_series(bench_source_key, sym, start_iso, end_iso) \
+                    .reindex(total_equity.index).ffill().bfill()
+
+                # benchmark value series: initial = portfolio_start_usd, plus daily deposits
+                dca_full_usd = _dca_value_from_deposits(
+                    s_price,
+                    deposit_daily,
+                    initial_usd=portfolio_start_usd
+                ).reindex(total_equity.index).ffill().bfill()
+
+                # --- end values (as before) ---
+                last_port = float(total_equity.iloc[-1])
+                last_bench = float(dca_full_usd.iloc[-1])
+                delta = last_port - last_bench
+                delta_pct = (delta / last_bench * 100.0) if last_bench > 0 else np.nan
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Portfolio total equity (end)", f"{last_port:,.2f} USD")
+                c2.metric(f"{bn} switch + DCA (end)", f"{last_bench:,.2f} USD")
+                c3.metric("Difference (Portfolio - Benchmark)", f"{delta:,.2f} USD",
+                          delta=(f"{delta_pct:+.2f}%" if np.isfinite(delta_pct) else None))
+
+                # --------------------------------------------------------
+                # Build daily external flows (Deposit + Transfer + Withdrawal)
+                # CF positive = money into account (end-of-day assumption)
+                # --------------------------------------------------------
+                raw_xtb = st.session_state.get("xtb_report_bytes", None)
+                if raw_xtb is None:
+                    st.info("No XTB report bytes in session_state. Cannot compute flow-adjusted performance.")
+                    raise RuntimeError("Missing XTB report")
+
+                df_cash_all = _xtb_read_cash_ops(raw_xtb).copy()
+
+                d0 = total_equity.index.min()
+                d1 = total_equity.index.max()
+
+                df_rng = df_cash_all[(df_cash_all["Date"] >= d0) & (df_cash_all["Date"] <= d1)].copy()
+                # ext_types = ["deposit", "transfer", "withdrawal"]
+                # ext = df_rng[df_rng["Type_norm"].isin(ext_types)].copy()
+                #
+                # # daily net external amount (positive = money into account)
+                # cf_daily = (
+                #     ext.groupby("Date", as_index=True)["Amount"]
+                #     .sum()
+                #     .reindex(total_equity.index, fill_value=0.0)
+                #     .astype(float)
+                # )
+                # External flows definition:
+                # - deposit: always
+                # - withdrawal: always
+                # - transfer: ONLY positive (transfer-in to USD)
+                mask_ext = (
+                        df_rng["Type_norm"].eq("deposit")
+                        | df_rng["Type_norm"].eq("withdrawal")
+                        | (df_rng["Type_norm"].eq("transfer") & (df_rng["Amount"] > 0))
+                )
+
+                ext = df_rng.loc[mask_ext].copy()
+
+                cf_daily = (
+                    ext.groupby("Date", as_index=True)["Amount"]
+                    .sum()
+                    .reindex(total_equity.index, fill_value=0.0)
+                    .astype(float)
+                )
+
+
+                # --------------------------------------------------------
+                # Flow-adjusted daily returns (Time-Weighted Return)
+                # r_t = (E_t - CF_t)/E_{t-1} - 1
+                # Assumption: CF_t happens at end of day t (matches your EOD equity series)
+                # --------------------------------------------------------
+                def _twr_returns(equity: pd.Series, cf: pd.Series) -> pd.Series:
+                    e = equity.astype(float).copy()
+                    f = cf.reindex(e.index).astype(float).fillna(0.0)
+                    prev = e.shift(1)
+
+                    r = (e - f) / prev - 1.0
+                    r[(prev <= 0) | (~np.isfinite(r))] = np.nan
+                    return r.dropna()
+
+
+                port_eq = total_equity.astype(float)
+                bench_eq = dca_full_usd.astype(float)
+
+                port_ret = _twr_returns(port_eq, cf_daily)
+                bench_ret = _twr_returns(bench_eq, cf_daily)
+
+                # align
+                aligned = pd.concat([port_ret.rename("p"), bench_ret.rename("b")], axis=1).dropna()
+                p = aligned["p"]
+                b = aligned["b"]
+                active = p - b
+
+
+                # --------------------------------------------------------
+                # Return indices for drawdown and total return (TWR)
+                # --------------------------------------------------------
+                def _return_index(r: pd.Series) -> pd.Series:
+                    return (1.0 + r).cumprod()
+
+
+                def _max_drawdown_from_index(idx: pd.Series) -> float:
+                    if idx.empty:
+                        return np.nan
+                    dd = idx / idx.cummax() - 1.0
+                    return float(dd.min())
+
+
+                port_idx = _return_index(p)
+                bench_idx = _return_index(b)
+
+                port_twr_total = float(port_idx.iloc[-1] - 1.0) if not port_idx.empty else np.nan
+                bench_twr_total = float(bench_idx.iloc[-1] - 1.0) if not bench_idx.empty else np.nan
+                active_total = float((1.0 + port_twr_total) / (1.0 + bench_twr_total) - 1.0) \
+                    if np.isfinite(port_twr_total) and np.isfinite(bench_twr_total) and (
+                            1.0 + bench_twr_total) != 0 else np.nan
+
+                days = (aligned.index.max() - aligned.index.min()).days
+                years = (days / 365.0) if days > 0 else np.nan
+
+
+                def _cagr_from_total(total_return: float, years: float) -> float:
+                    if not np.isfinite(total_return) or not np.isfinite(years) or years <= 0:
+                        return np.nan
+                    return (1.0 + total_return) ** (1.0 / years) - 1.0
+
+
+                port_cagr = _cagr_from_total(port_twr_total, years)
+                bench_cagr = _cagr_from_total(bench_twr_total, years)
+
+                port_mdd = _max_drawdown_from_index(port_idx)
+                bench_mdd = _max_drawdown_from_index(bench_idx)
+
+
+                # --------------------------------------------------------
+                # Risk metrics (based on flow-adjusted daily returns)
+                # --------------------------------------------------------
+                def _ann_vol(r: pd.Series) -> float:
+                    return float(r.std(ddof=0) * np.sqrt(252)) if len(r) else np.nan
+
+
+                def _sharpe(r: pd.Series, rf_annual: float) -> float:
+                    if r.empty:
+                        return np.nan
+                    rf_daily = (1.0 + rf_annual) ** (1.0 / 252.0) - 1.0
+                    ex = r - rf_daily
+                    sd = ex.std(ddof=0)
+                    return float((ex.mean() / sd) * np.sqrt(252)) if sd and np.isfinite(sd) else np.nan
+
+
+                def _sortino(r: pd.Series, rf_annual: float) -> float:
+                    if r.empty:
+                        return np.nan
+                    rf_daily = (1.0 + rf_annual) ** (1.0 / 252.0) - 1.0
+                    ex = r - rf_daily
+                    downside = ex[ex < 0]
+                    dd = downside.std(ddof=0)
+                    return float((ex.mean() / dd) * np.sqrt(252)) if dd and np.isfinite(dd) else np.nan
+
+
+                tracking_err = _ann_vol(active)
+                info_ratio = float((active.mean() / active.std(ddof=0)) * np.sqrt(252)) if active.std(
+                    ddof=0) else np.nan
+                win_rate = float((active > 0).mean() * 100.0) if len(active) else np.nan
+
+                port_vol = _ann_vol(p)
+                bench_vol = _ann_vol(b)
+
+                # beta, alpha, corr (optional but useful)
+                beta = np.nan
+                alpha_ann = np.nan
+                corr = np.nan
+                if len(aligned) > 5 and np.isfinite(b.var(ddof=0)) and b.var(ddof=0) > 0:
+                    beta = float(np.cov(p, b, ddof=0)[0, 1] / b.var(ddof=0))
+                    alpha_daily = float(p.mean() - beta * b.mean())
+                    alpha_ann = alpha_daily * 252.0
+                    corr = float(np.corrcoef(p, b)[0, 1])
+
+                # --------------------------------------------------------
+                # XIRR (money-weighted) for both: portfolio vs benchmark
+                # Use the same external flows but different end value
+                # --------------------------------------------------------
+                start_date = port_eq.index[0].date()
+                end_date = port_eq.index[-1].date()
+
+
+                def _build_xirr_flows(end_value: float):
+                    flows = [(start_date, -float(port_eq.iloc[0]))]
+                    for dt, amt in cf_daily.items():
+                        if abs(float(amt)) < 1e-12:
+                            continue
+                        flows.append((dt.date(), -float(amt)))  # investor perspective
+                    flows.append((end_date, +float(end_value)))
+                    return flows
+
+
+                port_xirr = _xirr(_build_xirr_flows(float(port_eq.iloc[-1])), guess=0.1)
+                bench_xirr = _xirr(_build_xirr_flows(float(bench_eq.iloc[-1])), guess=0.1)
+
+                # --------------------------------------------------------
+                # Risk-free for Sharpe/Sortino
+                # --------------------------------------------------------
+                rf_pct = st.number_input(
+                    "Risk-free rate (annual, %)",
+                    min_value=0.0,
+                    max_value=20.0,
+                    value=0.0,
+                    step=0.25,
+                    key="perf_rf_pct"
+                )
+                rf_annual = rf_pct / 100.0
+
+                port_sh = _sharpe(p, rf_annual)
+                bench_sh = _sharpe(b, rf_annual)
+                port_so = _sortino(p, rf_annual)
+                bench_so = _sortino(b, rf_annual)
+
+                # --------------------------------------------------------
+                # Display
+                # --------------------------------------------------------
+                st.markdown("#### Performance vs benchmark (range)")
+
+                r1, r2, r3 = st.columns(3)
+                r1.metric("TWR total return (Portfolio)",
+                          f"{port_twr_total * 100:.2f}%" if np.isfinite(port_twr_total) else "n/a")
+                r2.metric(f"TWR total return ({bn})",
+                          f"{bench_twr_total * 100:.2f}%" if np.isfinite(bench_twr_total) else "n/a")
+                r3.metric("Active return (TWR)", f"{active_total * 100:.2f}%" if np.isfinite(active_total) else "n/a")
+
+                r4, r5, r6 = st.columns(3)
+                r4.metric("CAGR (Portfolio, TWR)", f"{port_cagr * 100:.2f}%" if np.isfinite(port_cagr) else "n/a")
+                r5.metric(f"CAGR ({bn}, TWR)", f"{bench_cagr * 100:.2f}%" if np.isfinite(bench_cagr) else "n/a")
+                r6.metric("Win rate (daily)", f"{win_rate:.1f}%" if np.isfinite(win_rate) else "n/a")
+
+                r7, r8, r9 = st.columns(3)
+                r7.metric("Max drawdown (Portfolio)", f"{port_mdd * 100:.2f}%" if np.isfinite(port_mdd) else "n/a")
+                r8.metric(f"Max drawdown ({bn})", f"{bench_mdd * 100:.2f}%" if np.isfinite(bench_mdd) else "n/a")
+                r9.metric("Tracking error (ann.)", f"{tracking_err * 100:.2f}%" if np.isfinite(tracking_err) else "n/a")
+
+                r10, r11, r12 = st.columns(3)
+                r10.metric("Volatility (ann.) Portfolio", f"{port_vol * 100:.2f}%" if np.isfinite(port_vol) else "n/a")
+                r11.metric(f"Volatility (ann.) {bn}", f"{bench_vol * 100:.2f}%" if np.isfinite(bench_vol) else "n/a")
+                r12.metric("Information ratio (ann.)", f"{info_ratio:.2f}" if np.isfinite(info_ratio) else "n/a")
+
+                r13, r14, r15 = st.columns(3)
+                r13.metric("Sharpe (Portfolio)", f"{port_sh:.2f}" if np.isfinite(port_sh) else "n/a")
+                r14.metric(f"Sharpe ({bn})", f"{bench_sh:.2f}" if np.isfinite(bench_sh) else "n/a")
+                r15.metric("Sortino (Portfolio)", f"{port_so:.2f}" if np.isfinite(port_so) else "n/a")
+
+                r16, r17, r18 = st.columns(3)
+                r16.metric(f"Sortino ({bn})", f"{bench_so:.2f}" if np.isfinite(bench_so) else "n/a")
+                r17.metric("XIRR (Portfolio)", f"{port_xirr * 100:.2f}%" if port_xirr is not None else "n/a")
+                r18.metric(f"XIRR ({bn} switch+DCA)", f"{bench_xirr * 100:.2f}%" if bench_xirr is not None else "n/a")
+
+                r19, r20, r21 = st.columns(3)
+                r19.metric("Beta (Portfolio vs bench)", f"{beta:.2f}" if np.isfinite(beta) else "n/a")
+                r20.metric("Alpha (annual, approx)", f"{alpha_ann * 100:.2f}%" if np.isfinite(alpha_ann) else "n/a")
+                r21.metric("Correlation", f"{corr:.2f}" if np.isfinite(corr) else "n/a")
+
+                # Optional: keep the old equity growth for context (not performance)
+                with st.expander("Equity growth (includes deposits) - context only"):
+                    eq_growth_port = float(port_eq.iloc[-1] / port_eq.iloc[0] - 1.0) if float(
+                        port_eq.iloc[0]) != 0 else np.nan
+                    eq_growth_bench = float(bench_eq.iloc[-1] / bench_eq.iloc[0] - 1.0) if float(
+                        bench_eq.iloc[0]) != 0 else np.nan
+                    st.write(f"Portfolio equity growth: {eq_growth_port * 100:.2f}%")
+                    st.write(f"{bn} equity growth: {eq_growth_bench * 100:.2f}%")
+
+            except Exception as e:
+                st.info(f"Performance metrics error: {e}")
 
 # -----------------------------------------------------------
 # CODE TO DISPLAY DIVIDEND TIMELINE
@@ -1156,152 +2283,6 @@ else:
         # 10) Stocks in your portfolio with no dividend:
         if no_div_stocks:
             st.info("Stocks in your portfolio with no dividend: " + ", ".join(no_div_stocks))
-
-
-
-# ------------------------------------------------------------------
-#   PORÓWNANIE PORTFELA Z INDEKSAMI (yfinance)
-# ------------------------------------------------------------------
-# with st.expander("Portfolio vs. indeksy (S&P 500 / NASDAQ / Dow Jones)"):
-
-st.markdown("---")
-st.header("Portfolio vs index benchmarks")
-
-if daily_portfolio.empty:
-    st.info("Brak historii portfela – nie można narysować porównania.")
-else:
-    # ----------------------------------------------------------
-    # 1) Zakres dat = dokładnie taki jak w daily_portfolio
-    # ----------------------------------------------------------
-    start_date = daily_portfolio["Date of record"].min().date()
-    end_date   = daily_portfolio["Date of record"].max().date() + pd.Timedelta(days=1)
-
-    # ----------------------------------------------------------
-    # 2) Funkcja pobierająca indeks z yfinance
-    # ----------------------------------------------------------
-    @st.cache_data(show_spinner=False)
-    def load_index(symbol: str, start, end):
-        df = yf.download(
-            symbol,
-            start=start.strftime("%Y-%m-%d"),
-            end=end.strftime("%Y-%m-%d"),
-            progress=False,
-            interval="1d",
-            auto_adjust=True,  # skorygowane ceny
-        )
-
-        # 1) Wybieramy kolumnę z ceną zamknięcia
-        price_col = "Adj Close" if "Adj Close" in df.columns else "Close"
-
-        # 2) df[price_col] może być Series **lub** DataFrame (MultiIndex kolumn).
-        #    W obu przypadkach sprowadzamy do DataFrame z jedną kolumną = symbol.
-        if isinstance(df[price_col], pd.Series):
-            df_price = df[price_col].rename(symbol).to_frame()
-        else:  # DataFrame
-            df_price = df[[price_col]].copy()
-            df_price.columns = [symbol]
-
-        # 3) Porządkujemy indeks
-        df_price.index = pd.to_datetime(df_price.index).tz_localize(None)
-        return df_price
-
-
-    idx_symbols = {
-        "^GSPC": "S&P 500",
-        "^IXIC": "NASDAQ Composite",
-        "^DJI": "Dow Jones",
-
-        "^RUT": "Russell 2000",
-        "^NDX": "NASDAQ 100",
-        "^MID": "S&P 400 MidCap",
-        "^W5000": "Wilshire 5000",
-
-        "URTH": "MSCI World (ETF)",
-        "EEM": "MSCI EM (ETF)",
-        # "^STOXX50E": "Euro STOXX 50",
-        "^N225": "Nikkei 225"
-    }
-
-    idx_frames = []
-    for sym, nice_name in idx_symbols.items():
-        df_i = load_index(sym, start_date, end_date)
-        df_i.columns = [nice_name]  # <- tu zmieniamy kolumnę
-        idx_frames.append(df_i)
-    df_indices = pd.concat(idx_frames, axis=1)
-
-    # ----------------------------------------------------------
-    # 3) Łączymy z historią portfela
-    # ----------------------------------------------------------
-    port_series = (
-        daily_portfolio
-        .set_index("Date of record")["PortfolioValue"]
-        .rename("Portfolio")
-    )
-
-    perf_df = pd.concat([port_series, df_indices], axis=1).sort_index()
-
-    # Jeśli portfolio ma luki w datach, forward-fill żeby indeksy miały komplet:
-    perf_df["Portfolio"] = perf_df["Portfolio"].ffill()
-
-    # ----------------------------------------------------------
-    # 4) Normalizacja do 100 = pierwszy dzień
-    # ----------------------------------------------------------
-    for col in perf_df.columns:
-        first_val = perf_df[col].iloc[0]
-        perf_df[col] = perf_df[col] / first_val * 100
-
-
-    # ── 1.  przełącznik nad wykresem ────────────────────────────────────────────
-    bench_opts = ["S&P 500", "NASDAQ Composite", "Dow Jones",
-                  "Russell 2000", "NASDAQ 100", "S&P 400 MidCap",
-                  "Wilshire 5000", "MSCI World (ETF)", "MSCI EM (ETF)", "Nikkei 225"]
-
-    default_opts = ["S&P 500", "NASDAQ Composite", "Dow Jones"]  # start bez bałaganu
-
-    show_bench = st.multiselect(
-        "Benchmarks to display:",
-        options=bench_opts,
-        default=default_opts
-    )
-    # (linię Portfolio zostawiamy na stałe – nie ma w selectorze)
-    # Portfolio linia jest obowiązkowa – nie dodajemy jej do multiselectu
-
-    # ── 2.  konstrukcja wykresu ────────────────────────────────────────────────
-    fig_perf = go.Figure()
-
-    # • Portfolio (zawsze):
-    fig_perf.add_trace(
-        go.Scatter(
-            x=perf_df.index,
-            y=perf_df["Portfolio"],
-            name="Portfolio",
-            mode="lines",
-            line=dict(width=3)
-        )
-    )
-
-    # • Benchmarks wybrane w multiselect:
-    for col in show_bench:
-        fig_perf.add_trace(
-            go.Scatter(
-                x=perf_df.index,
-                y=perf_df[col],
-                name=col,
-                mode="lines",
-                line=dict(width=1.8, dash="dot")
-            )
-        )
-
-    # ── 3.  wygląd & renderowanie ─────────────────────────────────────────────
-    fig_perf.update_layout(
-        yaxis_title="Normalized value",
-        xaxis_title="Date",
-        hovermode="x unified",
-        height=600,
-        legend=dict(orientation="h", yanchor="bottom",
-                    y=1.02, xanchor="right", x=1)
-    )
-    st.plotly_chart(fig_perf, use_container_width=True)
 
 
 # =====================================================================
@@ -2166,397 +3147,16 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+st.markdown("<hr>", unsafe_allow_html=True)
 
-#PL AI comentary code
-# # ============================
-# #  AI PORTFOLIO COMMENTARY (RAG-style prompt → OpenAI)
-# #  — place at the very end of portfolio_forecaster page
-# # ============================
-#
-#
-# def _hash_sha256(s: str) -> str:
-#     return hashlib.sha256(s.encode("utf-8")).hexdigest()
-#
-#
-# def _safe_rerun():
-#     # kompatybilność wstecz
-#     try:
-#         st.rerun()
-#     except Exception:
-#         # starsze wersje
-#         if hasattr(st, "experimental_rerun"):
-#             st.experimental_rerun()
-#
-# def render_section_logout(section_key: str, label: str = "🔒 Wyloguj tę sekcję"):
-#     ss_key = f"{section_key}__authed"
-#     if st.session_state.get(ss_key, False):
-#         if st.button(label, key=f"{section_key}__logout_main", use_container_width=True):
-#             st.session_state[ss_key] = False
-#             _safe_rerun()   # Twoja funkcja z wcześniejszego patcha (używa st.rerun())
-#
-#
-# def check_section_access(section_key: str) -> bool:
-#     ss_key = f"{section_key}__authed"
-#
-#     if st.session_state.get(ss_key, False):
-#         return True
-#
-#     cfg = st.secrets.get("auth", {})
-#     plains = set(cfg.get("passwords_plain", []))
-#     hashes = set(cfg.get("passwords_sha256", []))
-#
-#     if not plains and not hashes:
-#         st.error("Brak skonfigurowanych haseł w st.secrets['auth']. Zabezpieczenie wyłączone.")
-#         return False
-#
-#     with st.expander("🔒 Ta sekcja jest chroniona hasłem — kliknij, aby odblokować", expanded=True):
-#         pw = st.text_input("Hasło", type="password", key=f"{section_key}__pw")
-#
-#         ok_clicked = st.button("Odblokuj", key=f"{section_key}__unlock", use_container_width=True)
-#
-#         if ok_clicked:
-#             is_ok = any(hmac.compare_digest(pw, p) for p in plains) or (
-#                     pw and any(hmac.compare_digest(hashlib.sha256(pw.encode()).hexdigest(), h) for h in hashes)
-#             )
-#             if is_ok:
-#                 st.session_state[ss_key] = True
-#                 st.success("Dostęp przyznany.")
-#                 _safe_rerun()
-#             else:
-#                 st.error("Nieprawidłowe hasło.")
-#
-#         # st.caption("Ustaw hasła w `.streamlit/secrets.toml` → [auth] …")
-#
-#     return False
-#
-#
-# st.markdown("---")
-# st.header("AI portfolio commentary")
-#
-# # ---- UŻYCIE: otocz swoją sekcję komentarza AI ----
-# if check_section_access("portfolio_ai_comment"):
-#
-#     with st.expander("Generate AI summary & sanity-check for my portfolio"):
-#
-#         # simple rate-limit reusing the pattern from your other page
-#         if "last_click_time_portfolio" not in st.session_state:
-#             st.session_state["last_click_time_portfolio"] = 0.0
-#
-#         # ——— Guardrails / data requirements ———
-#         if portfolio_df.empty:
-#             st.info("Your portfolio is empty — add/upload positions first.")
-#         elif "Stock" not in filtered_data.columns:
-#             st.info("No forecast universe loaded for the selected date.")
-#         else:
-#             # Build a clean, compact view of your current portfolio joined with forecasts
-#             # 1) copy & normalize the portfolio (BUY positive, SELL negative)
-#             _p = portfolio_df.copy()
-#             _p["Symbol"] = _p["Symbol"].astype(str).str.upper()
-#             _p["Volume"] = (
-#                 _p["Volume"].astype(str).str.replace(",", ".").astype(float, errors="ignore").fillna(0.0)
-#             )
-#             _p["Open price"] = (
-#                 _p["Open price"].astype(str).str.replace(",", ".").astype(float, errors="ignore").fillna(0.0)
-#             )
-#             _p["NetVolume"] = _p.apply(
-#                 lambda r: r["Volume"] if str(r["Type"]).upper() == "BUY" else -abs(r["Volume"]),
-#                 axis=1
-#             )
-#
-#             # 2) aggregate to net position per ticker
-#             pos = (
-#                 _p.groupby("Symbol", as_index=False)
-#                   .agg({"NetVolume":"sum"})
-#             )
-#             pos = pos[pos["NetVolume"] != 0]   # leave only open positions
-#
-#             if pos.empty:
-#                 st.info("All positions net to zero — nothing to analyze.")
-#             else:
-#                 # 3) latest prices/forecasts for the selected date
-#                 uni = filtered_data.copy()
-#                 uni["Stock"] = uni["Stock"].astype(str).str.upper()
-#
-#                 # numeric clean-up
-#                 def _to_num(s):
-#                     return pd.to_numeric(
-#                         s.astype(str).str.replace(",", "."),
-#                         errors="coerce"
-#                     )
-#                 for c in ["Price","Low Forecast","Median Forecast","High Forecast",
-#                           "Low Forecast Percent","Median Forecast Percent","High Forecast Percent",
-#                           "P/E ratio","Smart Score","Score","Number of analysts"]:
-#                     if c in uni.columns:
-#                         uni[c] = _to_num(uni[c])
-#
-#                 # Deduplicate to the last row per stock for that date (if multiple)
-#                 if "Date of record" in uni.columns:
-#                     uni = (uni.sort_values(["Stock","Date of record"])
-#                               .groupby("Stock", as_index=False).last())
-#
-#                 # 4) merge portfolio net positions with forecasts
-#                 merged_port = pos.merge(
-#                     uni,
-#                     left_on="Symbol", right_on="Stock",
-#                     how="left"
-#                 )
-#
-#                 # join average open price for context (value-weighted by signed volume)
-#                 _p_signed = _p.copy()
-#                 _p_signed["SignedCost"] = _p_signed["NetVolume"] * _p_signed["Open price"]
-#                 avg_open = (
-#                     _p_signed.groupby("Symbol", as_index=False)
-#                              .agg({"NetVolume":"sum","SignedCost":"sum"})
-#                 )
-#                 avg_open["Avg Open Price"] = avg_open.apply(
-#                     lambda r: (r["SignedCost"]/r["NetVolume"]) if r["NetVolume"] else float("nan"),
-#                     axis=1
-#                 )
-#                 merged_port = merged_port.merge(
-#                     avg_open[["Symbol","Avg Open Price"]],
-#                     on="Symbol", how="left"
-#                 )
-#
-#                 # compute helpful deltas (% distance to bands)
-#                 merged_port["Position Value (est.)"] = merged_port["NetVolume"] * merged_port["Price"]
-#                 merged_port["% below Low"]    = ( (merged_port["Low Forecast"] - merged_port["Price"]) / merged_port["Low Forecast"] * 100.0 )
-#                 merged_port["% to Median"]    = ( (merged_port["Median Forecast"] - merged_port["Price"]) / merged_port["Median Forecast"] * 100.0 )
-#                 merged_port["% above High"]   = ( (merged_port["Price"] - merged_port["High Forecast"]) / merged_port["High Forecast"] * 100.0 )
-#
-#                 # Compact table to ship to the LLM (keeps tokens low, but rich enough)
-#                 cols_for_llm = [
-#                     "Symbol","Sector","NetVolume","Price","Avg Open Price",
-#                     "Low Forecast","Median Forecast","High Forecast",
-#                     "Low Forecast Percent","Median Forecast Percent","High Forecast Percent",
-#                     "Smart Score","Score","P/E ratio","Number of analysts",
-#                     "Position Value (est.)","% below Low","% to Median","% above High"
-#                 ]
-#                 cols_for_llm = [c for c in cols_for_llm if c in merged_port.columns]
-#                 df_llm = merged_port[cols_for_llm].copy()
-#
-#                 # small rounding to reduce token size
-#                 for c in df_llm.columns:
-#                     if pd.api.types.is_float_dtype(df_llm[c]):
-#                         df_llm[c] = df_llm[c].round(4)
-#
-#                 # portfolio-level aggregates (context for the model)
-#                 port_ctx = {
-#                     "total_investment_est": float(total_investment) if "total_investment" in locals() else None,
-#                     "total_current_value_est": float(total_current_value) if "total_current_value" in locals() else None,
-#                     "n_positions": int(df_llm.shape[0])
-#                 }
-#
-#
-#
-#                 # ——— Prompt builder (PL, mirrors your requested intent) ———
-#                 def build_portfolio_prompt(df_payload: pd.DataFrame, context: dict) -> str:
-#                     # Convert the payload to a compact CSV-like block to keep it readable for the model
-#                     payload_csv = df_payload.to_csv(index=False)
-#                     guidance = f"""
-#     Jesteś analitykiem inwestycyjnym nastawionym na dane (quant). Otrzymasz mój aktualny portfel (tabela) oraz podstawowe metryki prognoz (Low/Median/High Forecast, %, Score, Smart Score, P/E, liczba analityków) dla każdej spółki.
-#
-#     **Zadanie:**
-#     1) Jeśli masz narzędzia do przeglądania internetu, poszukaj BARDZO KRÓTKO aktualnych, *istotnych* newsów (earnings, guidances, regulatory, M&A, product/recall, litigations) i nadchodzących wydarzeń (earnings date, lock-up, konferencje) dla każdej spółki.
-#        • Jeżeli NIE możesz przeglądać sieci – powiedz o tym jednym zdaniem i przejdź do analizy wyłącznie na bazie przekazanych danych.
-#     2) Dla każdej pozycji oceń stan wyceny w kontekście pasma prognoz: czy kurs jest poniżej Low (undervaluation), między Low-Median (neutral/ostrożnie), między Median-High (ryzyko przewartościowania), czy powyżej High (hype/przewartościowanie).
-#     3) Wskaż, czy w perspektywie 12 miesięcy widzisz przesłanki do **sprzedaży** (silne sygnały: powyżej High + słabe fundamenty/newsflow), czy raczej **trzymać** (brak istotnych zagrożeń, dane wspierają hold), pamiętając, że jestem konserwatywnym inwestorem i nie reaguję na tygodniowe wahania nastrojów.
-#     4) Podaj syntetyczne wnioski portfela (2–4 zdania): główne ryzyka, koncentracje sektorowe/tematyczne, oczekiwane pasmo zwrotu wg mediany, oraz czy „nic nie robić” vs. „zredukować X”.
-#     5) Nie dawaj porad finansowych – to ma być analiza i wnioski, bez imperatywów.
-#
-#     **Kontekst portfela (szacunki):**
-#     - Liczba pozycji: {context.get("n_positions")}
-#     - Nakłady łączne (est.): {context.get("total_investment_est")}
-#     - Wycena bieżąca (est.): {context.get("total_current_value_est")}
-#
-#     **Dane portfela (CSV):**
-#     {payload_csv}
-#
-#     Zachowaj zwięzłość: 1 akapit „overview”, potem punktowo po spółkach (max 2 zdania/spółkę: [sygnał wyceny + 1 fakt/news + 1 wniosek]), na końcu krótkie podsumowanie decyzji (sprzedać coś? czy raczej hold wszystkiego) z uzasadnieniem. Używaj liczb i metryk z tabeli.
-#     """
-#                     return guidance.strip()
-#
-#                 prompt_text = build_portfolio_prompt(df_llm, port_ctx)
-#
-#                 # ——— Optional: show the exact prompt sent ———
-#                 # st.code(prompt_text)
-#                 #
-#                 # # --- dodatkowe pytanie użytkownika (opcjonalne) ---
-#                 # user_portfolio_question = st.text_area(
-#                 #     "Dodatkowe pytanie do mojego portfolio (opcjonalnie)",
-#                 #     placeholder="Np. Które pozycje wydają się być najbardziej ryzykowne przy obecnych wycenach?",
-#                 #     help="To pytanie zostanie zadane modelowi po głównej analizie i odniesione do Twoich danych z tabeli."
-#                 # )
-#
-#
-#                 # ============================
-#                 #  AI PORTFOLIO COMMENTARY — patch pod GPT-5 + web_search
-#                 # ============================
-#
-#                 # 1) UI: modele + (dla GPT-5) sterowanie reasoning/verbosity i web search
-#                 model_choice = st.selectbox(
-#                     "Choose the LLM Model",
-#                     ["gpt-5", "gpt-5-mini", "gpt-4o", "gpt-4o-mini"],
-#                     help=("GPT-5 używa Responses API i wspiera web_search. "
-#                           "GPT-4o pozostaje przez Chat Completions.")
-#                 )
-#
-#                 use_web_search = False
-#                 reasoning_effort = None
-#                 text_verbosity = None
-#
-#                 if model_choice.startswith("gpt-5"):
-#                     cols = st.columns(2)
-#                     with cols[0]:
-#                         reasoning_effort = st.selectbox(
-#                             "Reasoning effort (GPT-5)",
-#                             ["minimal", "low", "medium", "high"],
-#                             index=2,
-#                             help="Steruje głębokością rozumowania. 'minimal' i 'low' są szybsze, 'high' dokładniejsze."
-#                         )
-#                     with cols[1]:
-#                         text_verbosity = st.selectbox(
-#                             "Verbosity (GPT-5)",
-#                             ["low", "medium", "high"],
-#                             index=1,
-#                             help="Kontroluje długość odpowiedzi. Nie jest twardym limitem."
-#                         )
-#                     use_web_search = st.checkbox(
-#                         "Enable web search (GPT-5 Responses tool)",
-#                         value=True,
-#                         help="Pozwala modelowi wyszukiwać świeże informacje i zwracać cytowane źródła."
-#                     )
-#                     allowed_domains_str = ""
-#                     if use_web_search:
-#                         allowed_domains_str = st.text_input(
-#                             "Allowed domains (optional, comma-separated, bez https://)",
-#                             value="",
-#                             help="Np. 'wsj.com, bloomberg.com, reuters.com'. Puste = bez filtra."
-#                         )
-#
-#
-#                 # 2) Uniwersalny wrapper:
-#                 #    • gpt-5*  -> Responses API (bez limitu długości jak prosiłeś; nie wysyłamy temperature)
-#                 #    • gpt-4o* -> Chat Completions (z max_tokens)
-#                 def _llm_generate_portfolio_comment(client, model: str, system_text: str, user_text: str,
-#                                                     reasoning: str | None = None,
-#                                                     verbosity: str | None = None,
-#                                                     web_search: bool = False,
-#                                                     allowed_domains: list[str] | None = None,
-#                                                     max_tokens_non5: int = 1400) -> tuple[str, list[str]]:
-#                     """
-#                     Zwraca: (output_text, sources_urls)
-#                     sources_urls — pełna lista URLi, gdy web_search był użyty i model z niego skorzystał.
-#                     """
-#                     messages = [
-#                         {"role": "system", "content": system_text},
-#                         {"role": "user", "content": user_text},
-#                     ]
-#
-#                     # GPT-5 / GPT-5-mini
-#                     if model.startswith("gpt-5"):
-#                         req = {
-#                             "model": model,
-#                             "input": messages,  # Responses API akceptuje listę messages
-#                         }
-#                         # parametry specyficzne dla GPT-5
-#                         if reasoning:
-#                             req["reasoning"] = {"effort": reasoning}
-#                         if verbosity:
-#                             req["text"] = {"verbosity": verbosity}
-#
-#                         tools = []
-#                         if web_search:
-#                             tool_def = {"type": "web_search"}
-#                             # filtr domen (opcjonalny)
-#                             if allowed_domains:
-#                                 tool_def["filters"] = {"allowed_domains": allowed_domains[:20]}
-#                             tools.append(tool_def)
-#                         if tools:
-#                             req["tools"] = tools
-#                             req["tool_choice"] = "auto"
-#                             # chcemy pełną listę źródeł
-#                             req["include"] = ["web_search_call.action.sources"]
-#
-#                         # UWAGA: zgodnie z Twoją prośbą NIE ustawiamy max_output_tokens
-#                         resp = client.responses.create(**req)
-#
-#                         # Tekst
-#                         out_text = getattr(resp, "output_text", None)
-#                         if not out_text:
-#                             # fallback: złożyć tekst z elementów
-#                             out_text = ""
-#                             for item in getattr(resp, "output", []) or []:
-#                                 if item.get("type") == "message":
-#                                     for c in item.get("content", []) or []:
-#                                         if c.get("type") == "output_text":
-#                                             out_text += c.get("text", "")
-#
-#                         # Źródła (pełna lista)
-#                         sources = []
-#                         try:
-#                             for item in resp.output or []:
-#                                 if item.get("type") == "web_search_call":
-#                                     action = item.get("action", {})
-#                                     # Response SDK często ma to też pod include; sprawdzamy obie ścieżki:
-#                                     srcs = action.get("sources") or []
-#                                     for s in srcs:
-#                                         url = s.get("url")
-#                                         if url: sources.append(url)
-#                         except Exception:
-#                             pass
-#
-#                         return out_text.strip(), sources
-#
-#                     # GPT-4o / 4o-mini — Chat Completions
-#                     else:
-#                         cc = client.chat.completions.create(
-#                             model=model,
-#                             messages=messages,
-#                             # GPT-4o akceptuje temperature — zostawiamy umiarkowaną
-#                             temperature=0.5,
-#                             max_tokens=max_tokens_non5,
-#                         )
-#                         text = cc.choices[0].message.content.strip()
-#                         return text, []
-#
-#
-#                 # 3) Wywołanie (w miejscu Twojego przycisku)
-#                 if st.button("Wygeneruj komentarz AI o moim portfelu"):
-#                     now = time.time()
-#                     if now - st.session_state["last_click_time_portfolio"] < 120:
-#                         st.warning("Odczekaj proszę 120 sekund przed kolejnym komentarzem.")
-#                     else:
-#                         st.session_state["last_click_time_portfolio"] = now
-#                         try:
-#                             client = OpenAI(api_key=st.secrets["openai"]["OPENAI_API_KEY"])
-#                             with st.spinner("Generuję komentarz AI…"):
-#                                 out_text, sources = _llm_generate_portfolio_comment(
-#                                     client=client,
-#                                     model=model_choice,
-#                                     system_text=("Jesteś precyzyjnym, zwięzłym analitykiem ilościowym. "
-#                                                  "Unikasz porad inwestycyjnych; formułujesz analizę, ryzyka i wnioski."),
-#                                     user_text=prompt_text,
-#                                     reasoning=reasoning_effort if model_choice.startswith("gpt-5") else None,
-#                                     verbosity=text_verbosity if model_choice.startswith("gpt-5") else None,
-#                                     web_search=(use_web_search if model_choice.startswith("gpt-5") else False),
-#                                     allowed_domains=[d.strip() for d in (allowed_domains_str or "").split(",") if
-#                                                      d.strip()] if (
-#                                                 use_web_search and model_choice.startswith("gpt-5")) else None,
-#                                 )
-#
-#                             st.success("Komentarz gotowy:")
-#                             st.write(out_text)
-#
-#                             # Pokaż źródła, jeśli są
-#                             if sources:
-#                                 with st.expander("Źródła z wyszukiwania"):
-#                                     for u in dict.fromkeys(sources):  # dedup
-#                                         st.markdown(f"- <{u}>", unsafe_allow_html=False)
-#
-#                         except Exception as e:
-#                             st.error(f"Nie udało się wygenerować komentarza (model '{model_choice}'): {e}")
-#
-#     render_section_logout("portfolio_ai_comment")
-#     pass
-# else:
-#     st.stop()   # zatrzymuje render reszty tej strony pod sekcją (opcjonalnie)
+st.markdown("""\
+Please note: Investing involves risk and you may lose some or all of your capital. 
+This site is provided for informational purposes only and does not constitute financial advice.
+""")
+# st.markdown("<hr>", unsafe_allow_html=True)
+
+st.markdown("""
+    <p style="font-size: 12px; text-align: left; color: gray;">
+        Website made by @Michał Ostaszewski
+    </p>
+""", unsafe_allow_html=True)
