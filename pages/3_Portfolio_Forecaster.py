@@ -1426,6 +1426,145 @@ else:
                     st.dataframe(holdings.reset_index(), use_container_width=True)
 
 # ============================================================
+#   SMART SCORE (weighted by position size) timeline
+# ============================================================
+
+st.markdown("---")
+st.header("Smart Score portfela (ważony wielkością pozycji)")
+
+if "holdings_all" not in locals() or holdings_all.empty:
+    st.info("Brak danych o pozycjach z XTB. Najpierw wgraj pełny raport XLSX i upewnij się, że sekcja Holdings timeline działa.")
+else:
+    df_scores = load_forecast_data().copy()
+    required_cols = {"Stock", "Date of record", "Smart Score"}
+
+    if not required_cols.issubset(df_scores.columns):
+        st.warning("Brakuje wymaganych kolumn do Smart Score (Stock, Date of record, Smart Score).")
+    else:
+        # Normalize inputs
+        df_scores["Date of record"] = pd.to_datetime(df_scores["Date of record"], errors="coerce")
+        df_scores["Date"] = df_scores["Date of record"].dt.normalize()
+        df_scores["Stock"] = (
+            df_scores["Stock"].astype(str).str.strip().str.upper()
+                      .str.replace(r"\.US$", "", regex=True)
+        )
+        df_scores["Smart Score"] = pd.to_numeric(
+            df_scores["Smart Score"].astype(str).str.replace(",", "."),
+            errors="coerce"
+        )
+
+        df_scores = df_scores.dropna(subset=["Date", "Stock", "Smart Score"]).copy()
+        if df_scores.empty:
+            st.info("Brak danych Smart Score w bazie prognoz.")
+        else:
+            # Last record per stock per day
+            df_scores = (
+                df_scores.sort_values(["Stock", "Date of record"])
+                         .groupby(["Date", "Stock"], as_index=False)
+                         .last()
+            )
+
+            score_pivot = (
+                df_scores.pivot(index="Date", columns="Stock", values="Smart Score")
+                         .sort_index()
+            )
+
+            # Align to holdings timeline and forward-fill last known score
+            score_eval = score_pivot.reindex(holdings_all.index).ffill()
+
+            # Weigh by absolute position size (shares)
+            weights = holdings_all.abs().copy()
+            common_cols = [c for c in weights.columns if c in score_eval.columns]
+            missing_scores = sorted(list(set(weights.columns) - set(common_cols)))
+
+            if not common_cols:
+                st.info("Brak wspólnych tickerów pomiędzy pozycjami a bazą Smart Score.")
+            else:
+                s = score_eval[common_cols]
+                w = weights[common_cols]
+
+                w_masked = w.where(s.notna(), 0.0)
+                weight_sum = w_masked.sum(axis=1)
+                weighted_sum = (s.fillna(0.0) * w_masked).sum(axis=1)
+                wa_score = weighted_sum / weight_sum.replace(0, np.nan)
+
+                plot_series = wa_score.dropna()
+                if plot_series.empty:
+                    st.info("Nie udało się wyliczyć średniej ważonej Smart Score dla wybranego okresu.")
+                else:
+                    fig_score = go.Figure()
+                    fig_score.add_trace(go.Scatter(
+                        x=plot_series.index,
+                        y=plot_series.values,
+                        mode="lines+markers",
+                        name="Smart Score (ważony)",
+                        hovertemplate="%{x|%Y-%m-%d}<br>Smart Score: %{y:.2f}<extra></extra>"
+                    ))
+                    fig_score.update_layout(
+                        height=500,
+                        xaxis_title="Date",
+                        yaxis_title="Smart Score (weighted by position size)",
+                        margin=dict(t=20)
+                    )
+                    st.plotly_chart(fig_score, use_container_width=True)
+
+                    # Small table for current portfolio composition (latest date in range)
+                    latest_day = holdings_all.index.max()
+                    latest_pos_abs = holdings_all.loc[latest_day].abs()
+                    latest_pos_abs = latest_pos_abs[latest_pos_abs > 0]
+
+                    if not latest_pos_abs.empty:
+                        score_latest = score_eval.loc[latest_day] if latest_day in score_eval.index else pd.Series(dtype=float)
+                        score_map = score_latest.to_dict()
+
+                        # Latest available price per ticker (from forecast DB)
+                        df_prices_latest = load_forecast_data().copy()
+                        df_prices_latest["Date of record"] = pd.to_datetime(df_prices_latest["Date of record"], errors="coerce")
+                        df_prices_latest["Stock"] = (
+                            df_prices_latest["Stock"].astype(str).str.strip().str.upper()
+                                            .str.replace(r"\.US$", "", regex=True)
+                        )
+                        df_prices_latest["Price"] = pd.to_numeric(
+                            df_prices_latest["Price"].astype(str).str.replace(",", "."),
+                            errors="coerce"
+                        )
+                        df_prices_latest = df_prices_latest.dropna(subset=["Date of record", "Stock", "Price"])
+                        latest_price_map = (
+                            df_prices_latest.sort_values(["Stock", "Date of record"])
+                                            .groupby("Stock", as_index=True)["Price"]
+                                            .last()
+                                            .to_dict()
+                        )
+
+                        smartscore_table = pd.DataFrame({
+                            "Ticker": latest_pos_abs.index,
+                            "Liczba akcji": latest_pos_abs.values
+                        })
+                        smartscore_table["Smart Score"] = smartscore_table["Ticker"].map(score_map)
+                        smartscore_table["Price"] = smartscore_table["Ticker"].map(latest_price_map)
+                        smartscore_table["Wielkość pozycji (USD)"] = (
+                            smartscore_table["Liczba akcji"] * smartscore_table["Price"]
+                        )
+                        smartscore_table = (
+                            smartscore_table[["Ticker", "Smart Score", "Wielkość pozycji (USD)"]]
+                            .sort_values("Wielkość pozycji (USD)", ascending=False, ignore_index=True)
+                        )
+
+                        st.caption(f"Skład na dzień: {latest_day.date()}")
+                        st.dataframe(
+                            smartscore_table,
+                            hide_index=True,
+                            use_container_width=True
+                        )
+
+                if missing_scores:
+                    st.info(
+                        "Brak Smart Score dla części tickerów (pominięte w średniej): "
+                        + ", ".join(missing_scores[:30])
+                        + (" ..." if len(missing_scores) > 30 else "")
+                    )
+
+# ============================================================
 #   HOLDINGS MARKET VALUE (area) + CASH + BENCHMARKS
 #   Added benchmark mode:
 #   - Switch portfolio to benchmark + DCA (USD)

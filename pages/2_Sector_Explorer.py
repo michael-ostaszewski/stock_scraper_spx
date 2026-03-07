@@ -243,6 +243,68 @@ else:
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
+# ------------------------------------------------------------------
+#  HISTORICAL CHART 3 – SMART SCORE (market-cap weighted)
+# ------------------------------------------------------------------
+st.header("Market-cap weighted Smart Score")
+st.markdown("Average **Smart Score** for the selected sector over time, weighted by company market cap.")
+
+smart_cols = ["Date of record", "Smart Score"]
+if any(col not in sector_hist.columns for col in smart_cols):
+    st.warning("Required Smart Score columns are missing in the data.")
+else:
+    smart_hist = sector_hist.copy()
+    smart_hist["Smart Score"] = pd.to_numeric(
+        smart_hist["Smart Score"].astype(str).str.replace(",", "."),
+        errors="coerce"
+    )
+
+    # Build numeric market-cap weights
+    if "Market cap clear" in smart_hist.columns:
+        smart_hist["__mcap__"] = pd.to_numeric(smart_hist["Market cap clear"], errors="coerce")
+    elif "Market cap" in smart_hist.columns:
+        smart_hist["__mcap__"] = smart_hist["Market cap"].apply(parse_mcap)
+    else:
+        smart_hist["__mcap__"] = pd.NA
+
+    smart_hist = smart_hist[
+        smart_hist["Date of record"].notna()
+        & smart_hist["Smart Score"].notna()
+        & smart_hist["__mcap__"].notna()
+        & (smart_hist["__mcap__"] > 0)
+    ].copy()
+
+    if smart_hist.empty:
+        st.info("No valid data to compute market-cap weighted Smart Score for this sector.")
+    else:
+        smart_hist["__weighted__"] = smart_hist["Smart Score"] * smart_hist["__mcap__"]
+
+        smart_plot_df = (
+            smart_hist.groupby("Date of record", as_index=False)
+            .agg(weighted_sum=("__weighted__", "sum"), mcap_sum=("__mcap__", "sum"))
+            .sort_values("Date of record")
+        )
+        smart_plot_df["Weighted Smart Score"] = smart_plot_df["weighted_sum"] / smart_plot_df["mcap_sum"]
+
+        fig_smart = go.Figure()
+        fig_smart.add_trace(
+            go.Scatter(
+                x=smart_plot_df["Date of record"],
+                y=smart_plot_df["Weighted Smart Score"],
+                mode="lines+markers",
+                name="Weighted Smart Score",
+                hovertemplate="%{x|%Y-%m-%d}<br>Weighted Smart Score: %{y:.2f}<extra></extra>",
+            )
+        )
+        fig_smart.update_layout(
+            xaxis_title="Date",
+            yaxis_title="Smart Score (weighted by market cap)",
+            margin=dict(t=20),
+        )
+        st.plotly_chart(fig_smart, use_container_width=True)
+
+st.markdown("<hr>", unsafe_allow_html=True)
+
 
 
 
@@ -330,6 +392,59 @@ else:
             st.write(", ".join(no_dividend_stocks))
         else:
             st.info("All companies in this sector pay dividends.")
+
+st.markdown("<hr>", unsafe_allow_html=True)
+
+# ---------- AVERAGE P/E RATIO BY SECTOR -------------------------------------
+st.header("Average P/E Ratio by Sector")
+
+if "P/E ratio" not in df.columns:
+    st.warning("Kolumna **'P/E ratio'** nie istnieje w danych – nie mogę narysować wykresu.")
+else:
+    # konwersja do float + odrzucenie ekstremalnych P/E (>1000)
+    pe_df = df.copy()
+    pe_df["P/E ratio"] = pd.to_numeric(pe_df["P/E ratio"], errors="coerce")
+    pe_df = pe_df[(pe_df["P/E ratio"] <= 1000) | (pe_df["P/E ratio"].isna())]
+
+    # ---------- GLOBAL P/E METRICS (nad wykresem) ---------------------------
+    total_companies_global  = df["Stock"].nunique()
+    # companies_with_valid_pe = pe_df["Stock"].nunique()
+    avg_pe_global           = pe_df["P/E ratio"].median()
+
+    col1, col2, col3 = st.columns(3)
+    # col1.metric("All companies (selected date)", f"{total_companies_global}")
+    # col2.metric("Companies with P/E ≤ 1000",     f"{companies_with_valid_pe}")
+    col1.metric("Actual Average P/E in SP500",                   f"{avg_pe_global:.2f}")
+
+    # ---------- ŚREDNIE P/E DLA SEKTORÓW ------------------------------------
+    pe_by_sector = (
+        pe_df.dropna(subset=["P/E ratio"])
+             .groupby("Sector", as_index=False)["P/E ratio"]
+             .mean()
+             .sort_values("P/E ratio", ascending=False)
+             .round(2)
+    )
+
+    if pe_by_sector.empty:
+        st.info("Brak danych P/E dla wybranego dnia.")
+    else:
+        fig_pe = px.bar(
+            pe_by_sector,
+            x="Sector",
+            y="P/E ratio",
+            labels={"P/E ratio": "Average P/E"},
+            title=f"Average P/E Ratio by Sector ({chosen_date})"
+                   if chosen_date else
+                   "Average P/E Ratio by Sector",
+        )
+        fig_pe.update_layout(
+            xaxis_tickangle=-45,
+            yaxis_title="Average P/E",
+            xaxis_title="Sector",
+            height=600,
+            margin=dict(l=40, r=20, t=80, b=120),
+        )
+        st.plotly_chart(fig_pe, use_container_width=True)
 
 
 
