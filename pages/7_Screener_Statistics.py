@@ -2,6 +2,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from app_auth import require_auth
 from screener_statistics_data import (
     load_available_dates,
     load_sector_options,
@@ -13,6 +14,7 @@ from stock_forecaster_data import performance_block
 DATE_COL = "Date of record"
 
 st.set_page_config(page_title="Algorithm Trend Analysis")
+require_auth("Screener Statistics")
 
 st.markdown(
     """

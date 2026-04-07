@@ -9,8 +9,11 @@ import plotly.graph_objects as go
 import streamlit as st
 from textwrap import dedent
 
+from app_auth import require_auth
+
 # ---------- CONFIG -----------------------------------------------------------
 st.set_page_config(page_title="Stock Scanner")
+require_auth("Stock Scanner")
 st.title("Stock Scanner")
 
 ######### CSS – spójny z Twoją aplikacją #####################################

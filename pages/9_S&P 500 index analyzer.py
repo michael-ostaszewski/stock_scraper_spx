@@ -4,10 +4,13 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import date
+from app_auth import require_auth
 
 RAW_GITHUB_URL = (
     "/Users/michal/PycharmProjects/Stock Scraper/Index data/Clear_index_data/S&P 500 Historical Data from 1980 - with metrics.csv"
 )
+
+require_auth("S&P 500 index analyzer")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. GLOBAL CSS – kopiuję Twój styl dla metric-ów + przycisków

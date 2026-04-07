@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from app_auth import require_auth
 from sector_explorer_data import (
     load_available_dates,
     load_sector_day_snapshot,
@@ -14,6 +15,7 @@ from sector_explorer_data import (
 
 
 st.set_page_config(page_title="Sector Explorer")
+require_auth("Sector Explorer")
 
 st.markdown(
     """

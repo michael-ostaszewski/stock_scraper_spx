@@ -4,6 +4,9 @@ import datetime
 import pandas as pd
 import plotly.express as px
 
+from app_auth import require_auth
+
+require_auth("Investment Calculator")
 
 st.markdown(
     """

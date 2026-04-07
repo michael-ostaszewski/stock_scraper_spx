@@ -7,6 +7,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from app_auth import require_auth
 from portfolio_backtester_data import (
     BacktestPreparedData,
     load_available_dates,
@@ -15,6 +16,8 @@ from portfolio_backtester_data import (
     prepare_backtest_market,
 )
 from stock_forecaster_data import performance_block
+
+require_auth("Portfolio Backtester")
 
 
 EMPTY_TRADES_COLUMNS = ["Date", "Action", "Ticker", "Shares", "Price", "Gross", "Fee", "Net"]

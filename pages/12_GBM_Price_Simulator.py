@@ -7,6 +7,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pandas.tseries.offsets import BDay
 from datetime import date, timedelta
+from app_auth import require_auth
+
+require_auth("GBM Price Simulator")
 
 # ---------- Styling (keeps your app look & feel) ----------
 st.markdown(
@@ -498,5 +501,4 @@ st.caption(
     "It ignores jumps, stochastic volatility, dividends, splits alignment, and other market microstructure effects. "
     "Use for educational purposes; this is not investment advice."
 )
-
 

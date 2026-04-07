@@ -13,6 +13,7 @@ import io
 import re
 from plotly.subplots import make_subplots
 
+from app_auth import require_auth
 from portfolio_forecaster_data import (
     PORTFOLIO_DAY_SNAPSHOT_COLUMNS,
     PORTFOLIO_HISTORY_COLUMNS,
@@ -23,6 +24,8 @@ from portfolio_forecaster_data import (
     normalize_portfolio_tickers,
 )
 from stock_forecaster_data import performance_block
+
+require_auth("Portfolio Forecaster")
 
 st.markdown("""
 <style>

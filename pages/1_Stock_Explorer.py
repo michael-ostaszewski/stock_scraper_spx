@@ -4,7 +4,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from app_auth import require_auth
 from stock_explorer_data import load_company_history, normalize_ticker, performance_block
+
+require_auth("Stock Explorer")
 
 
 def split_range(range_value: str):
