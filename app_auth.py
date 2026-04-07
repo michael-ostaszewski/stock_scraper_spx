@@ -13,7 +13,6 @@ import streamlit as st
 
 AUTH_SESSION_KEY = "supabase_auth_session"
 AUTH_FLASH_ERROR_KEY = "supabase_auth_flash_error"
-GOOGLE_FLOW_TTL_SECONDS = 900
 
 
 class AuthError(RuntimeError):
@@ -266,40 +265,16 @@ def _build_pkce_code_challenge(code_verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
 
 
-@st.cache_resource
-def _google_oauth_flow_store() -> dict[str, dict[str, Any]]:
-    return {}
-
-
-def _cleanup_google_oauth_flows():
-    store = _google_oauth_flow_store()
-    now = int(time.time())
-    expired_flow_ids = [
-        flow_id
-        for flow_id, payload in store.items()
-        if int(payload.get("created_at") or 0) < now - GOOGLE_FLOW_TTL_SECONDS
-    ]
-    for flow_id in expired_flow_ids:
-        store.pop(flow_id, None)
-
-
-def _store_google_oauth_flow(flow_id: str, code_verifier: str):
-    _cleanup_google_oauth_flows()
-    _google_oauth_flow_store()[flow_id] = {
-        "code_verifier": code_verifier,
-        "created_at": int(time.time()),
-    }
-
-
-def _pop_google_oauth_flow(flow_id: str) -> dict[str, Any] | None:
-    _cleanup_google_oauth_flows()
-    return _google_oauth_flow_store().pop(flow_id, None)
-
-
-def _build_google_redirect_url(flow_id: str) -> str:
+def _build_google_redirect_url(flow_id: str, code_verifier: str) -> str:
     redirect_to = _oauth_app_url()
     separator = "&" if "?" in redirect_to else "?"
-    return f"{redirect_to}{separator}google_flow_id={flow_id}"
+    params = urlencode(
+        {
+            "google_flow_id": flow_id,
+            "google_code_verifier": code_verifier,
+        }
+    )
+    return f"{redirect_to}{separator}{params}"
 
 
 def build_google_oauth_url() -> str:
@@ -308,11 +283,9 @@ def build_google_oauth_url() -> str:
     flow_id = secrets.token_urlsafe(24)
     code_challenge = _build_pkce_code_challenge(code_verifier)
 
-    _store_google_oauth_flow(flow_id, code_verifier)
-
     params = {
         "provider": "google",
-        "redirect_to": _build_google_redirect_url(flow_id),
+        "redirect_to": _build_google_redirect_url(flow_id, code_verifier),
         "code_challenge": code_challenge,
         "code_challenge_method": "s256",
     }
@@ -338,6 +311,7 @@ def _exchange_google_code_for_session(auth_code: str, code_verifier: str) -> dic
 def handle_oauth_callback() -> bool:
     code = _query_param("code")
     flow_id = _query_param("google_flow_id")
+    code_verifier = _query_param("google_code_verifier")
     error = _query_param("error")
     error_description = _query_param("error_description")
 
@@ -351,20 +325,12 @@ def handle_oauth_callback() -> bool:
         _safe_rerun()
         return True
 
-    flow = _pop_google_oauth_flow(flow_id)
-    if not isinstance(flow, dict):
-        _set_flash_error("Missing Google sign-in flow. Start the Google flow again.")
-        _clear_oauth_query_params()
-        _safe_rerun()
-        return True
-
     if not flow_id:
         _set_flash_error("Google sign-in flow mismatch. Start the Google flow again.")
         _clear_oauth_query_params()
         _safe_rerun()
         return True
 
-    code_verifier = str(flow.get("code_verifier") or "")
     if not code_verifier or not code:
         _set_flash_error("Missing OAuth callback data. Start the Google flow again.")
         _clear_oauth_query_params()
