@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 import time
 from openai import OpenAI
 import numpy as np
+from app_auth import require_auth
 from stock_forecaster_data import (
     get_last_date,
     load_daily_market_metrics,
@@ -14,6 +15,8 @@ from stock_forecaster_data import (
     load_selected_stocks_daily_metrics,
     performance_block,
 )
+
+require_auth("Best stocks in S&P500 Index")
 
 ######### CSS ########
 st.markdown(
