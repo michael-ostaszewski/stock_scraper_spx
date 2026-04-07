@@ -5,7 +5,7 @@ import hashlib
 import secrets
 import time
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import requests
 import streamlit as st
@@ -44,14 +44,53 @@ def _auth_config() -> dict[str, str]:
     }
 
 
+def _normalize_public_url(raw_url: str) -> str:
+    candidate = str(raw_url or "").strip().rstrip("/")
+    if not candidate:
+        return ""
+
+    parts = urlsplit(candidate)
+    if not parts.scheme or not parts.netloc:
+        return ""
+
+    path = parts.path or "/"
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+
 def _oauth_app_url() -> str:
+    try:
+        current_url = str(getattr(st.context, "url", "") or "").strip()
+    except Exception:
+        current_url = ""
+
+    normalized_current_url = _normalize_public_url(current_url)
+    if normalized_current_url:
+        return normalized_current_url
+
+    try:
+        host = str(st.context.headers.get("host") or "").strip()
+    except Exception:
+        host = ""
+
+    if host:
+        scheme = "http" if host.startswith(("localhost", "127.0.0.1")) else "https"
+        normalized_host_url = _normalize_public_url(f"{scheme}://{host}")
+        if normalized_host_url:
+            return normalized_host_url
+
     cfg = st.secrets.get("supabase_auth", {})
-    app_url = str(cfg.get("app_url") or "").strip().rstrip("/")
-    if not app_url:
-        raise AuthError(
-            "Missing Supabase OAuth redirect config. Add st.secrets['supabase_auth']['app_url']."
-        )
-    return app_url
+    local_app_url = _normalize_public_url(str(cfg.get("local_app_url") or ""))
+    if local_app_url:
+        return local_app_url
+
+    app_url = _normalize_public_url(str(cfg.get("app_url") or ""))
+    if app_url:
+        return app_url
+
+    raise AuthError(
+        "Missing Supabase OAuth redirect config. Add st.secrets['supabase_auth']['app_url'] "
+        "or set st.secrets['supabase_auth']['local_app_url'] for local development."
+    )
 
 
 def _auth_request(
