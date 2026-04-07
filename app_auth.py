@@ -368,16 +368,50 @@ def logout():
 
 def _render_login_screen(page_label: str | None = None):
     flash_error = _consume_flash_error()
+    if "auth_terms_accepted" not in st.session_state:
+        st.session_state["auth_terms_accepted"] = True
 
-    st.title("Sign in required")
+    terms_accepted = st.session_state.get("auth_terms_accepted", True)
+
+    st.title("Secure Sign In")
     if page_label:
-        st.caption(f"Log in to access {page_label}.")
+        st.caption(f"Sign in to access {page_label}.")
     else:
         st.caption("Log in to access this page.")
 
     st.info(
-        "This app now requires authentication before any market data is loaded. "
-        "You can sign in with Google or with an owner-provisioned email/password account."
+        "Authentication is required before market data can be accessed."
+    )
+
+    with st.expander("Access Options", expanded=True):
+        st.markdown(
+            "- **Email and Password**: Available for accounts provisioned by the application owner. If this is your first login with email, please contact the owner to have credentials assigned to your address.\n"
+            "- **Google Sign-In**: Recommended for self-service access. If you have previously used Google to access the platform, continue with the same option."
+        )
+
+    with st.expander("Privacy Notice and Terms of Use", expanded=False):
+        st.markdown(
+            "**Data Controller**: Michal Ostaszewski, contact: michael@cosmonity.com\n\n"
+            "This application is currently a non-commercial project created for knowledge sharing, research, and experimentation.\n\n"
+            "**Use of the App**\n"
+            "- Access to the application is voluntary.\n"
+            "- The content is provided for informational and educational purposes only.\n"
+            "- Any decisions made on the basis of the data, forecasts, or analytics presented in the application are made at your own risk and responsibility.\n\n"
+            "**Personal Data and Authentication**\n"
+            "- To provide secure access, the application processes basic authentication data such as your email address and login provider information.\n"
+            "- Outside of authentication and technical access control, the application does not currently collect additional personal data for marketing purposes.\n"
+            "- At present, your data is not used for marketing campaigns. In the future, contact details may be used to send updates, information, or offers related to this application.\n\n"
+            "**Cookies and Technical Storage**\n"
+            "- The application does not currently use advertising cookies or analytics cookies.\n"
+            "- Essential technical storage mechanisms may still be used by Streamlit, Supabase Auth, or Google Sign-In to support secure login and session handling.\n\n"
+            "**Project Status**\n"
+            "- This is not currently a commercial service.\n"
+            "- The application may be modified, limited, or discontinued at any time."
+        )
+
+    terms_accepted = st.checkbox(
+        "I have read and accept the Privacy Notice and Terms of Use.",
+        key="auth_terms_accepted",
     )
 
     if flash_error:
@@ -386,9 +420,16 @@ def _render_login_screen(page_label: str | None = None):
     with st.form("supabase_login_form", clear_on_submit=False):
         email = st.text_input("Email", autocomplete="email")
         password = st.text_input("Password", type="password", autocomplete="current-password")
-        submitted = st.form_submit_button("Sign in", use_container_width=True)
+        submitted = st.form_submit_button(
+            "Sign in",
+            type="primary",
+            use_container_width=True,
+        )
 
     if submitted:
+        if not terms_accepted:
+            st.error("Please review and accept the Privacy Notice and Terms of Use before signing in.")
+            return
         try:
             user = sign_in_with_password(email, password)
         except AuthError as exc:
@@ -407,10 +448,19 @@ def _render_login_screen(page_label: str | None = None):
     except AuthError as exc:
         st.error(f"Google sign-in setup error: {exc}")
     else:
-        if hasattr(st, "link_button"):
+        if not terms_accepted:
+            st.button(
+                "Sign in with Google",
+                type="secondary",
+                use_container_width=True,
+                disabled=True,
+                help="Accept the Privacy Notice and Terms of Use to continue.",
+            )
+        elif hasattr(st, "link_button"):
             st.link_button(
                 "Sign in with Google",
                 redirect_url,
+                type="secondary",
                 use_container_width=True,
             )
         else:
