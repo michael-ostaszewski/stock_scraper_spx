@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
+import secrets
 import time
 from typing import Any
+from urllib.parse import urlencode
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 AUTH_SESSION_KEY = "supabase_auth_session"
+AUTH_GOOGLE_FLOW_KEY = "supabase_google_oauth_flow"
+AUTH_FLASH_ERROR_KEY = "supabase_auth_flash_error"
+OAUTH_QUERY_PARAMS = ("code", "state", "error", "error_code", "error_description")
 
 
 class AuthError(RuntimeError):
@@ -36,6 +45,16 @@ def _auth_config() -> dict[str, str]:
         "base_url": base_url,
         "publishable_key": publishable_key,
     }
+
+
+def _oauth_app_url() -> str:
+    cfg = st.secrets.get("supabase_auth", {})
+    app_url = str(cfg.get("app_url") or "").strip().rstrip("/")
+    if not app_url:
+        raise AuthError(
+            "Missing Supabase OAuth redirect config. Add st.secrets['supabase_auth']['app_url']."
+        )
+    return app_url
 
 
 def _auth_request(
@@ -99,6 +118,7 @@ def _store_session(payload: dict[str, Any]):
 
 def clear_auth_session():
     st.session_state.pop(AUTH_SESSION_KEY, None)
+    st.session_state.pop(AUTH_GOOGLE_FLOW_KEY, None)
 
 
 def get_session_user() -> dict[str, Any] | None:
@@ -173,6 +193,140 @@ def sign_in_with_password(email: str, password: str) -> dict[str, Any]:
     return payload.get("user") or {}
 
 
+def _query_param(name: str) -> str:
+    value = st.query_params.get(name)
+    if isinstance(value, list):
+        return str(value[0]) if value else ""
+    return str(value or "")
+
+
+def _clear_oauth_query_params():
+    try:
+        st.query_params.clear()
+        return
+    except Exception:
+        pass
+
+    try:
+        st.experimental_set_query_params()
+    except Exception:
+        pass
+
+
+def _set_flash_error(message: str):
+    st.session_state[AUTH_FLASH_ERROR_KEY] = str(message)
+
+
+def _consume_flash_error() -> str:
+    return str(st.session_state.pop(AUTH_FLASH_ERROR_KEY, "") or "")
+
+
+def _build_pkce_code_verifier() -> str:
+    verifier = secrets.token_urlsafe(64)
+    return verifier[:96]
+
+
+def _build_pkce_code_challenge(code_verifier: str) -> str:
+    digest = hashlib.sha256(code_verifier.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+
+
+def build_google_oauth_url() -> str:
+    cfg = _auth_config()
+    redirect_to = _oauth_app_url()
+    code_verifier = _build_pkce_code_verifier()
+    state = secrets.token_urlsafe(32)
+    code_challenge = _build_pkce_code_challenge(code_verifier)
+
+    st.session_state[AUTH_GOOGLE_FLOW_KEY] = {
+        "state": state,
+        "code_verifier": code_verifier,
+        "redirect_to": redirect_to,
+        "created_at": int(time.time()),
+    }
+
+    params = {
+        "provider": "google",
+        "redirect_to": redirect_to,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "s256",
+        "state": state,
+    }
+    return f"{cfg['base_url']}/auth/v1/authorize?{urlencode(params)}"
+
+
+def start_google_sign_in() -> str:
+    return build_google_oauth_url()
+
+
+def _exchange_google_code_for_session(auth_code: str, code_verifier: str) -> dict[str, Any]:
+    return _auth_request(
+        "POST",
+        "token",
+        params={"grant_type": "pkce"},
+        payload={
+            "auth_code": auth_code,
+            "code_verifier": code_verifier,
+        },
+    )
+
+
+def handle_oauth_callback() -> bool:
+    code = _query_param("code")
+    state = _query_param("state")
+    error = _query_param("error")
+    error_description = _query_param("error_description")
+
+    if not any((code, error, error_description)):
+        return False
+
+    if error:
+        message = error_description or error or "Google sign-in was cancelled."
+        _set_flash_error(message)
+        st.session_state.pop(AUTH_GOOGLE_FLOW_KEY, None)
+        _clear_oauth_query_params()
+        _safe_rerun()
+        return True
+
+    flow = st.session_state.get(AUTH_GOOGLE_FLOW_KEY)
+    if not isinstance(flow, dict):
+        _set_flash_error("Missing Google sign-in state. Start the Google flow again.")
+        _clear_oauth_query_params()
+        _safe_rerun()
+        return True
+
+    expected_state = str(flow.get("state") or "")
+    if not state or not expected_state or state != expected_state:
+        _set_flash_error("Google sign-in state mismatch. Start the Google flow again.")
+        st.session_state.pop(AUTH_GOOGLE_FLOW_KEY, None)
+        _clear_oauth_query_params()
+        _safe_rerun()
+        return True
+
+    code_verifier = str(flow.get("code_verifier") or "")
+    if not code_verifier or not code:
+        _set_flash_error("Missing OAuth callback data. Start the Google flow again.")
+        st.session_state.pop(AUTH_GOOGLE_FLOW_KEY, None)
+        _clear_oauth_query_params()
+        _safe_rerun()
+        return True
+
+    try:
+        payload = _exchange_google_code_for_session(code, code_verifier)
+    except AuthError as exc:
+        _set_flash_error(f"Google sign-in failed: {exc}")
+        st.session_state.pop(AUTH_GOOGLE_FLOW_KEY, None)
+        _clear_oauth_query_params()
+        _safe_rerun()
+        return True
+
+    _store_session(payload)
+    st.session_state.pop(AUTH_GOOGLE_FLOW_KEY, None)
+    _clear_oauth_query_params()
+    _safe_rerun()
+    return True
+
+
 def logout():
     session = st.session_state.get(AUTH_SESSION_KEY)
     access_token = ""
@@ -189,6 +343,8 @@ def logout():
 
 
 def _render_login_screen(page_label: str | None = None):
+    flash_error = _consume_flash_error()
+
     st.title("Sign in required")
     if page_label:
         st.caption(f"Log in to access {page_label}.")
@@ -196,9 +352,12 @@ def _render_login_screen(page_label: str | None = None):
         st.caption("Log in to access this page.")
 
     st.info(
-        "This app now requires a Supabase Auth account before any market data is loaded. "
-        "Accounts are provisioned by the app owner."
+        "This app now requires authentication before any market data is loaded. "
+        "You can sign in with Google or with an owner-provisioned email/password account."
     )
+
+    if flash_error:
+        st.error(flash_error)
 
     with st.form("supabase_login_form", clear_on_submit=False):
         email = st.text_input("Email", autocomplete="email")
@@ -213,6 +372,29 @@ def _render_login_screen(page_label: str | None = None):
         else:
             st.success(f"Signed in as {user.get('email', 'user')}.")
             _safe_rerun()
+
+    st.markdown(
+        "<div style='text-align:center; margin: 0.75rem 0 0.5rem 0; color: #9ca3af;'>or</div>",
+        unsafe_allow_html=True,
+    )
+
+    google_clicked = st.button("Sign in with Google", key="auth_google_sign_in", use_container_width=True)
+    if google_clicked:
+        try:
+            redirect_url = start_google_sign_in()
+        except AuthError as exc:
+            st.error(f"Google sign-in setup error: {exc}")
+        else:
+            components.html(
+                f"""
+                <script>
+                    window.parent.location.href = {json.dumps(redirect_url)};
+                </script>
+                """,
+                height=0,
+            )
+            st.caption("Redirecting to Google...")
+            st.stop()
 
 
 def _render_auth_sidebar():
@@ -236,6 +418,9 @@ def require_auth(page_label: str | None = None) -> dict[str, Any]:
     if session:
         _render_auth_sidebar()
         return session.get("user") or {}
+
+    if handle_oauth_callback():
+        st.stop()
 
     _render_login_screen(page_label=page_label)
     st.stop()
