@@ -13,16 +13,16 @@ import io
 import re
 from plotly.subplots import make_subplots
 
-# ======================================================================
-# 1. Global CSS styles for buttons
-#    - Red style for the "Clear current portfolio data" button
-#    - Default green style for other st.button() elements
-# ======================================================================
-
-# st.set_page_config(
-#     layout="wide",
-#     # initial_sidebar_state="expanded"
-# )
+from portfolio_forecaster_data import (
+    PORTFOLIO_DAY_SNAPSHOT_COLUMNS,
+    PORTFOLIO_HISTORY_COLUMNS,
+    load_available_dates,
+    load_portfolio_day_snapshot,
+    load_portfolio_history,
+    load_stock_universe,
+    normalize_portfolio_tickers,
+)
+from stock_forecaster_data import performance_block
 
 st.markdown("""
 <style>
@@ -55,36 +55,81 @@ div.stButton > button:hover {
 </style>
 """, unsafe_allow_html=True)
 
-# ======================================================================
-# 2. Loading forecast data (from GitHub) + initial configuration
-# ======================================================================
-@st.cache_data
-def load_forecast_data():
-    """Loads the main forecast data from a CSV file on GitHub."""
-    file_url = "https://raw.githubusercontent.com/michael-ostaszewski/stock_scraper_spx/main/stocks/stocks_data.csv"
-    data = pd.read_csv(file_url, delimiter=';')
-    return data
-
-df_forecasts = load_forecast_data()
-
-# Convert date if there is a "Date of record" column
-if "Date of record" in df_forecasts.columns:
-    df_forecasts["Date of record"] = pd.to_datetime(df_forecasts["Date of record"], errors='coerce')
+def _empty_day_snapshot() -> pd.DataFrame:
+    return pd.DataFrame(columns=PORTFOLIO_DAY_SNAPSHOT_COLUMNS)
 
 
-# ======================================================================
-# 3. Sidebar: Date selection (if "Date of record" exists)
-# ======================================================================
-if "Date of record" in df_forecasts.columns:
-    unique_dates = sorted(df_forecasts["Date of record"].dropna().unique())
-    max_date = unique_dates[-1] if len(unique_dates) > 0 else None
-    selected_date = st.sidebar.date_input("Date selector", value=max_date)
-    # Filter forecasts by date
-    filtered_data = df_forecasts[df_forecasts["Date of record"] == pd.Timestamp(selected_date)]
-    if filtered_data.empty:
-        st.sidebar.warning("No forecast data for the selected date.")
+def _empty_history() -> pd.DataFrame:
+    return pd.DataFrame(columns=PORTFOLIO_HISTORY_COLUMNS)
+
+
+def _prepare_history_daily_last(history_df: pd.DataFrame) -> pd.DataFrame:
+    if history_df.empty:
+        return _empty_history()
+
+    daily_last = history_df.copy()
+    sort_keys = ["Stock", "Date of record"]
+    if "Time of record" in daily_last.columns:
+        daily_last["Time of record"] = daily_last["Time of record"].fillna("").astype(str)
+        sort_keys.append("Time of record")
+
+    daily_last = (
+        daily_last.sort_values(sort_keys)
+        .groupby(["Date of record", "Stock"], as_index=False)
+        .last()
+    )
+    return daily_last.reset_index(drop=True)
+
+
+def _build_price_pivot(daily_last_df: pd.DataFrame) -> pd.DataFrame:
+    if daily_last_df.empty:
+        return pd.DataFrame()
+
+    required_columns = {"Date of record", "Stock", "Price"}
+    if not required_columns.issubset(daily_last_df.columns):
+        return pd.DataFrame()
+
+    working = daily_last_df.copy()
+    working["Date"] = pd.to_datetime(working["Date of record"], errors="coerce").dt.normalize()
+    working = working.dropna(subset=["Date", "Stock", "Price"])
+    if working.empty:
+        return pd.DataFrame()
+
+    return working.pivot(index="Date", columns="Stock", values="Price").sort_index()
+
+
+def _build_latest_history_by_stock(daily_last_df: pd.DataFrame) -> pd.DataFrame:
+    if daily_last_df.empty:
+        return _empty_history()
+
+    return (
+        daily_last_df.sort_values(["Stock", "Date of record"])
+        .groupby("Stock", as_index=False)
+        .last()
+    )
+
+
+available_dates = load_available_dates()
+if available_dates:
+    max_date = available_dates[-1]
+    selected_date = st.sidebar.date_input(
+        "Date selector",
+        value=max_date,
+        min_value=available_dates[0],
+        max_value=max_date,
+    )
+    data_version = max_date.isoformat()
 else:
-    filtered_data = df_forecasts
+    max_date = datetime.date.today()
+    selected_date = st.sidebar.date_input("Date selector", value=max_date)
+    data_version = ""
+    st.sidebar.warning("No forecast dates available in the database.")
+
+filtered_data = _empty_day_snapshot()
+portfolio_history = _empty_history()
+portfolio_history_daily_last = _empty_history()
+xtb_history = _empty_history()
+xtb_history_daily_last = _empty_history()
 
 
 # ======================================================================
@@ -121,27 +166,19 @@ st.markdown("<hr>", unsafe_allow_html=True)
 # ======================================================================
 # 5. CSV instructions + example file
 # ======================================================================
-# example_csv_path = "/Users/michal/PycharmProjects/Stock Scraper/Example csv file portfolio forecaster/xtb stock list.csv"
-# example_df = pd.read_csv(example_csv_path, delimiter=';')
-
 @st.cache_data
 def load_example_portfolio():
-    url = (
-        "https://raw.githubusercontent.com/michael-ostaszewski/stock_scraper_spx/refs/heads/main/Example%20csv%20file%20portfolio%20forecaster/xtb%20stock%20list.csv"
-    )
-    return pd.read_csv(url, delimiter=';')
-
-try:
-    example_df = load_example_portfolio()
-except Exception as e:
-    # awaryjny mini‑przykład, żeby aplikacja nigdy nie padła
     example_df = pd.DataFrame({
         "Symbol": ["AAPL", "MSFT"],
-        "Type":   ["BUY", "BUY"],
+        "Type": ["BUY", "BUY"],
         "Volume": [1, 2],
-        "Open time": ["" , ""],
-        "Open price": [0, 0],
+        "Open time": ["", ""],
+        "Open price": [123.45, 410.00],
     })
+    return example_df
+
+
+example_df = load_example_portfolio()
 
 
 html_table = example_df.head(3).to_html(index=False, border=0)
@@ -207,35 +244,19 @@ custom_html = f"""
     <div class="custom-table">
         {html_table}
     </div>
-    <a class="download-link" href="https://raw.githubusercontent.com/michael-ostaszewski/stock_scraper_spx/refs/heads/main/Example%20csv%20file%20portfolio%20forecaster/xtb%20stock%20list.csv">
+    <a class="download-link" download="xtb_stock_list_sample.csv" href="data:text/csv;charset=utf-8,{csv_data_encoded}">
     Download sample CSV file here
 </a>
 </details>
 """
+
+st.markdown(custom_html, unsafe_allow_html=True)
 
 # ======================================================================
 # 6. Unified upload: CSV *or* XLSX (auto-transform for XLSX)
 # ======================================================================
 
 st.markdown("#### Upload XLSX file from your XTB with full history of your portfolio:")
-
-@st.cache_data
-def _load_example_portfolio():  # zachowujemy poprzednią pomocniczą funkcję
-    url = (
-        "https://raw.githubusercontent.com/michael-ostaszewski/stock_scraper_spx/refs/heads/main/Example%20csv%20file%20portfolio%20forecaster/xtb%20stock%20list.csv"
-    )
-    return pd.read_csv(url, delimiter=';')
-
-try:
-    _example_df = _load_example_portfolio()
-except Exception:
-    _example_df = pd.DataFrame({
-        "Symbol": ["AAPL", "MSFT"],
-        "Type":   ["BUY", "BUY"],
-        "Volume": [1, 2],
-        "Open time": ["" , ""],
-        "Open price": [0, 0],
-    })
 
 st.caption("Accepted formats: **.csv**, **.xlsx**, **.xls**")
 uploaded_any = st.file_uploader("", type=["csv", "xlsx", "xls"])
@@ -524,11 +545,6 @@ if not portfolio_df.empty:
         errors="coerce"
     ).fillna(0)
 
-# # # Calculate the number of unique stocks in the portfolio
-# num_unique_tickers = portfolio_df.groupby("Symbol").apply(
-#     lambda df: (df["Volume"] * df["Type"].apply(lambda t: 1 if str(t).upper() == "BUY" else -1)).sum() != 0
-# ).sum()
-
 if portfolio_df.empty:
     num_unique_tickers = 0
 else:
@@ -554,36 +570,54 @@ except Exception as e:
     st.error("Error converting Volume or Open price: " + str(e))
 
 
-# 1) Interpret SELL as negative volume:
+portfolio_df["Symbol"] = (
+    portfolio_df["Symbol"]
+    .astype(str)
+    .str.strip()
+    .str.upper()
+    .str.replace(r"\.US$", "", regex=True)
+)
+
 portfolio_df["NetVolume"] = portfolio_df.apply(
     lambda row: row["Volume"] if str(row["Type"]).upper() == "BUY" else -abs(row["Volume"]),
     axis=1
 )
 
-# Calculate the investment amount based on purchase data (from NetVolume):
+open_portfolio_tickers = normalize_portfolio_tickers(portfolio_df)
+portfolio_tickers = list(open_portfolio_tickers)
+portfolio_context = {
+    "tickers": open_portfolio_tickers,
+    "has_open_positions": bool(open_portfolio_tickers),
+}
+
+if available_dates and portfolio_context["has_open_positions"]:
+    filtered_data = load_portfolio_day_snapshot(selected_date, data_version).copy()
+    portfolio_history = load_portfolio_history(open_portfolio_tickers, data_version).copy()
+    if filtered_data.empty:
+        st.sidebar.warning("No forecast data for the selected date.")
+else:
+    filtered_data = _empty_day_snapshot()
+    portfolio_history = _empty_history()
+
+portfolio_history_daily_last = _prepare_history_daily_last(portfolio_history)
+portfolio_history_latest = _build_latest_history_by_stock(portfolio_history_daily_last)
+
 total_investment = (portfolio_df["NetVolume"] * portfolio_df["Open price"]).sum()
 
-# Calculate the current investment value:
-# Assume that `filtered_data` contains forecasts for the selected date, and the 'Price' column is the current price.
-# Make sure the symbols are compared in the same format (e.g., uppercase).
-portfolio_df["Symbol"] = portfolio_df["Symbol"].str.upper()
-filtered_data["Stock"] = filtered_data["Stock"].str.upper()
+if not filtered_data.empty and "Stock" in filtered_data.columns:
+    filtered_data["Stock"] = filtered_data["Stock"].astype(str).str.upper()
 
-# Calculate the current investment value (also with NetVolume):
 merged_df = portfolio_df.merge(filtered_data[["Stock", "Price"]], left_on="Symbol", right_on="Stock", how="left")
 merged_df["Price"] = merged_df["Price"].fillna(0)
 total_current_value = (merged_df["NetVolume"] * merged_df["Price"]).sum()
 
-# We calculate the percentage difference between total_current_value and total_investment
 if total_investment != 0:
     percent_diff = ((total_current_value - total_investment) / total_investment) * 100
 else:
     percent_diff = 0
 
 st.header("Portfolio Summary and Allocation")
-            # st.write("Net value perspective (BUY - SELL).")
 
-# Display 3 metrics in columns:
 col1, col2, col3 = st.columns(3)
 col1.metric("Number of stocks in portfolio", f"{num_unique_tickers}")
 col2.metric("Investment amount", f"{total_investment:.2f} USD")
@@ -642,33 +676,27 @@ if not user_df.empty and {"Symbol", "Type", "Volume", "Open price"}.issubset(use
             st.plotly_chart(fig_pie, use_container_width=True)
 
 
-if "Sector" in df_forecasts.columns and 'portfolio_grouped' in locals() and not portfolio_grouped.empty:
-    # 1) Merge: join portfolio_grouped with sector data
+if "Sector" in filtered_data.columns and 'portfolio_grouped' in locals() and not portfolio_grouped.empty:
     df_sector_merge = portfolio_grouped.merge(
-        df_forecasts[["Stock", "Sector"]].drop_duplicates(subset=["Stock"]),
+        filtered_data[["Stock", "Sector"]].drop_duplicates(subset=["Stock"]),
         left_on="Symbol",
         right_on="Stock",
         how="left"
     )
-    # Stocks not found in df_forecasts get "Unknown Sector"
     df_sector_merge["Sector"] = df_sector_merge["Sector"].fillna("Unknown Sector")
 
-    # 2) Group by sector – sum the Invested and combine tickers into one string
     df_sector_grouped = df_sector_merge.groupby("Sector", as_index=False).agg({
         "Invested": "sum",
         "Symbol": lambda x: ", ".join(x.unique())
     })
 
-    # Filter out sectors with Invested ≤ 0
     df_sector_grouped = df_sector_grouped[df_sector_grouped["Invested"] > 0]
 
     if df_sector_grouped.empty:
         st.info("No positive investment values in the sector breakdown.")
     else:
-        # Round the Invested value
         df_sector_grouped["Invested"] = df_sector_grouped["Invested"].round(2)
 
-        # Create a pie chart; pass ticker list as customdata
         fig_sector = go.Figure(
             data=[go.Pie(
                 labels=df_sector_grouped["Sector"],
@@ -689,31 +717,16 @@ else:
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
-
-# # --------------------------------------------------------------
-# # 12-Month Forecast Returns (Detailed vs. Compressed dropdown)
-# # --------------------------------------------------------------
 st.header("12‑Month Forecast Returns")
 
-# 1) Copy portfolio, compute NetVolume
-user_df = st.session_state["user_portfolio_df"].copy()
-user_df["Symbol"] = user_df["Symbol"].str.upper()
-
-def to_net_volume(row):
-    t = str(row["Type"]).upper()
-    v = float(str(row["Volume"]).replace(",", ".") or 0)
-    return v if t == "BUY" else -abs(v)
-
-user_df["NetVolume"] = user_df.apply(to_net_volume, axis=1)
-
-# 2) Forecast rows for tickers we actually hold
-portfolio_tickers = user_df["Symbol"].unique().tolist()
+user_df = portfolio_df.copy()
 scoring = filtered_data[filtered_data["Stock"].isin(portfolio_tickers)].copy()
+merged = pd.DataFrame()
+wa_median = np.nan
 
 if scoring.empty:
     st.warning("No forecasts available for the stocks in your portfolio on the selected date.")
 else:
-    # ---------- A) 3 headline metrics --------------------------------------
     merged = scoring.merge(
         user_df[["Symbol", "NetVolume"]],
         left_on="Stock", right_on="Symbol", how="inner"
@@ -741,7 +754,6 @@ else:
         r1c2.metric("Median – Median Forecast", f"{wa_median:.2f}%")
         r1c3.metric("Median – High Forecast",   f"{wa_high:.2f}%")
 
-    # ---------- B) Select box with 5 modes ---------------------------------
     view_mode = st.selectbox(
         "Forecast view:",
         options=["Detailed", "Compressed", "Low only", "Median only", "High only"],
@@ -753,71 +765,73 @@ else:
     fig = go.Figure()
     detailed_idx, comp_idx = [], []
 
-    # ---------- C‑1) Detailed traces (per ticker × 3 levels) ---------------
-    df_det = df_forecasts[df_forecasts["Stock"].isin(portfolio_tickers)].copy()
-    df_det["Date of record"] = pd.to_datetime(df_det["Date of record"], errors="coerce")
+    with performance_block("build_portfolio_forecast_chart"):
+        df_det = portfolio_history_daily_last[
+            portfolio_history_daily_last["Stock"].isin(portfolio_tickers)
+        ].copy()
 
-    for tk in portfolio_tickers:
-        dtk = df_det[df_det["Stock"] == tk]
-        if dtk.empty: continue
-        for col in forecast_cols:
-            yvals = dtk[col].astype(str).str.replace(",", ".").astype(float, errors="ignore").fillna(0).round(2)
-            fig.add_trace(
-                go.Scatter(
-                    x=dtk["Date of record"],
-                    y=yvals,
-                    mode="lines+markers",
-                    name=f"{tk} – {col}",
-                    visible=True        # will adjust below
+        for tk in portfolio_tickers:
+            dtk = df_det[df_det["Stock"] == tk]
+            if dtk.empty:
+                continue
+            for col in forecast_cols:
+                yvals = (
+                    dtk[col]
+                    .astype(str)
+                    .str.replace(",", ".")
+                    .astype(float, errors="ignore")
+                    .fillna(0)
+                    .round(2)
                 )
-            )
-            detailed_idx.append(len(fig.data)-1)
-
-    # ---------- C‑2) Compressed (value‑weighted) traces --------------------
-    df_portfolio_net = (
-        user_df.groupby("Symbol", as_index=False)["NetVolume"].sum()
-        .rename(columns={"Symbol": "Stock"})
-    )
-    df_w = (
-        df_det.sort_values(["Stock","Date of record"])
-              .groupby(["Stock","Date of record"], as_index=False).last()
-              .merge(df_portfolio_net, on="Stock", how="left")
-    )
-    df_w["Price"] = df_w["Price"].astype(str).str.replace(",", ".").astype(float, errors="ignore").fillna(0)
-    df_w["stock_value"] = df_w["NetVolume"] * df_w["Price"]
-
-    def w_avg(g,col):
-        num = (g[col]*g["stock_value"]).sum()
-        den = g["stock_value"].sum()
-        return num/den if den else 0
-
-    df_cmp = df_w.groupby("Date of record", as_index=False).apply(
-        lambda g: pd.Series({
-            "Weighted Low":    w_avg(g,"Low Forecast Percent"),
-            "Weighted Median": w_avg(g,"Median Forecast Percent"),
-            "Weighted High":   w_avg(g,"High Forecast Percent")
-        })
-    ).reset_index()
-
-    if not df_cmp.empty:
-        for col in ["Weighted Low","Weighted Median","Weighted High"]:
-            fig.add_trace(
-                go.Scatter(
-                    x=df_cmp["Date of record"],
-                    y=df_cmp[col].round(2),
-                    mode="lines+markers",
-                    name=f"Compressed – {col}",
-                    visible=False
+                fig.add_trace(
+                    go.Scatter(
+                        x=dtk["Date of record"],
+                        y=yvals,
+                        mode="lines+markers",
+                        name=f"{tk} – {col}",
+                        visible=True
+                    )
                 )
-            )
-            comp_idx.append(len(fig.data)-1)
+                detailed_idx.append(len(fig.data) - 1)
 
-    # ---------- D) Prepare index lists for Low / Median / High only --------
+        df_portfolio_net = (
+            user_df.groupby("Symbol", as_index=False)["NetVolume"].sum()
+            .rename(columns={"Symbol": "Stock"})
+        )
+        df_w = df_det.merge(df_portfolio_net, on="Stock", how="left")
+        df_w["Price"] = df_w["Price"].astype(str).str.replace(",", ".").astype(float, errors="ignore").fillna(0)
+        df_w["stock_value"] = df_w["NetVolume"] * df_w["Price"]
+
+        def w_avg(g, col):
+            num = (g[col] * g["stock_value"]).sum()
+            den = g["stock_value"].sum()
+            return num / den if den else 0
+
+        df_cmp = df_w.groupby("Date of record", as_index=False).apply(
+            lambda g: pd.Series({
+                "Weighted Low": w_avg(g, "Low Forecast Percent"),
+                "Weighted Median": w_avg(g, "Median Forecast Percent"),
+                "Weighted High": w_avg(g, "High Forecast Percent")
+            })
+        ).reset_index()
+
+        if not df_cmp.empty:
+            for col in ["Weighted Low", "Weighted Median", "Weighted High"]:
+                fig.add_trace(
+                    go.Scatter(
+                        x=df_cmp["Date of record"],
+                        y=df_cmp[col].round(2),
+                        mode="lines+markers",
+                        name=f"Compressed – {col}",
+                        visible=False
+                    )
+                )
+                comp_idx.append(len(fig.data) - 1)
+
     low_idx    = [i for i,tr in enumerate(fig.data) if "Low"    in tr.name]
     med_idx    = [i for i,tr in enumerate(fig.data) if "Median" in tr.name]
     high_idx   = [i for i,tr in enumerate(fig.data) if "High"   in tr.name and "Low" not in tr.name]
 
-    # ---------- E) Visibility switch ---------------------------------------
     total = len(fig.data)
     vis_all_det  = [i in detailed_idx for i in range(total)]
     vis_all_cmp  = [i in comp_idx     for i in range(total)]
@@ -834,7 +848,6 @@ else:
     for i,tr in enumerate(fig.data):
         tr.visible = chosen_vis[i]
 
-    # ---------- F) Layout tweaks -------------------------------------------
     fig.update_layout(
         xaxis_title="Date",
         yaxis_title="Forecast (%)",
@@ -844,7 +857,6 @@ else:
     all_y = []
     for tr in fig.data:
         if tr.visible and tr.y is not None:
-            # tr.y → ndarray → .tolist() daje zwykłą listę
             all_y.extend([v for v in tr.y.tolist() if pd.notnull(v)])
 
     if all_y:
@@ -1033,32 +1045,6 @@ else:
         idx_eval = pd.date_range(start_prev, end_day, freq="D")
         cash_eval = cash_balance_full.reindex(idx_eval, method="ffill").fillna(0.0)
 
-        # ---- prices daily from your database ----
-        df_all_prices = load_forecast_data().copy()
-        if "Date of record" not in df_all_prices.columns:
-            st.warning("No 'Date of record' in your price database, cannot compute return/XIRR.")
-            df_all_prices["Date of record"] = pd.NaT
-
-        df_all_prices["Date of record"] = pd.to_datetime(df_all_prices["Date of record"], errors="coerce")
-        df_all_prices["Date"] = df_all_prices["Date of record"].dt.normalize()
-
-        df_all_prices["Stock"] = df_all_prices["Stock"].astype(str).str.strip().str.upper()
-        df_all_prices["Stock"] = df_all_prices["Stock"].str.replace(r"\.US$", "", regex=True)
-
-        df_all_prices["Price"] = pd.to_numeric(
-            df_all_prices["Price"].astype(str).str.replace(",", "."),
-            errors="coerce"
-        ).fillna(0.0)
-
-        df_px_daily = (
-            df_all_prices
-            .dropna(subset=["Date", "Stock"])
-            .sort_values(["Stock", "Date of record"])
-            .groupby(["Date", "Stock"], as_index=False)
-            .last()
-        )
-        px_pivot = df_px_daily.pivot(index="Date", columns="Stock", values="Price").sort_index()
-
         # ---- positions from XTB ----
         @st.cache_data(show_spinner=False)
         def _xtb_read_positions(raw_bytes: bytes):
@@ -1173,7 +1159,7 @@ else:
             holdings.index.name = "Date"
             return holdings.sort_index(axis=1)
 
-        allowed = set(df_all_prices["Stock"].dropna().unique().tolist())
+        allowed = load_stock_universe(data_version)
 
         try:
             df_closed, df_open = _xtb_read_positions(raw_xtb)
@@ -1188,103 +1174,92 @@ else:
             if dropped_cnt > 0:
                 st.info(f"Skipped {dropped_cnt} instruments not found in your price database (e.g. crypto, indices).")
 
-            holdings_eval = _build_daily_holdings(dp, start_prev, end_day)
+            xtb_tickers = tuple(sorted(dp["Symbol"].dropna().unique().tolist()))
+            xtb_history = load_portfolio_history(xtb_tickers, data_version).copy()
+            xtb_history_daily_last = _prepare_history_daily_last(xtb_history)
+            px_pivot = _build_price_pivot(xtb_history_daily_last)
 
-            px_eval = px_pivot.reindex(holdings_eval.index).ffill().fillna(0.0)
+            if px_pivot.empty:
+                st.warning("No daily prices available for the instruments from your XTB report.")
+            else:
+                holdings_eval = _build_daily_holdings(dp, start_prev, end_day)
 
-            common_cols = [c for c in holdings_eval.columns if c in px_eval.columns]
-            missing_prices = sorted(list(set(holdings_eval.columns) - set(common_cols)))
+                px_eval = px_pivot.reindex(holdings_eval.index).ffill().fillna(0.0)
 
-            mv = (holdings_eval[common_cols] * px_eval[common_cols]).sum(axis=1)
-            equity = cash_eval + mv
+                common_cols = [c for c in holdings_eval.columns if c in px_eval.columns]
+                missing_prices = sorted(list(set(holdings_eval.columns) - set(common_cols)))
 
-            start_equity = float(equity.iloc[0])   # end of start_prev
-            end_equity   = float(equity.iloc[-1])  # end of end_day
+                mv = (holdings_eval[common_cols] * px_eval[common_cols]).sum(axis=1)
+                equity = cash_eval + mv
 
-            # ---- simple return (fixed: include transfer + withdrawal in net_contrib) ----
-            ext_types = ["deposit", "transfer", "withdrawal"]
-            net_contrib = df_period.loc[df_period["Type_norm"].isin(ext_types), "Amount"].sum()  # net cash into the account
+                start_equity = float(equity.iloc[0])   # end of start_prev
+                end_equity   = float(equity.iloc[-1])  # end of end_day
 
-            profit = end_equity - start_equity - float(net_contrib)
-            denom = start_equity + float(net_contrib)
-            simple_return = (profit / denom) if denom != 0 else np.nan
+                ext_types = ["deposit", "transfer", "withdrawal"]
+                net_contrib = df_period.loc[df_period["Type_norm"].isin(ext_types), "Amount"].sum()
 
-            # ---- XIRR (fixed: include transfer, correct dates) ----
-            flows = []
-            flows.append((start_prev.date(), -start_equity))
+                profit = end_equity - start_equity - float(net_contrib)
+                denom = start_equity + float(net_contrib)
+                simple_return = (profit / denom) if denom != 0 else np.nan
 
-            ext = df_period[df_period["Type_norm"].isin(ext_types)].copy()
-            # Flow convention: investor perspective cashflow = -Amount (Amount>0 is money into account)
-            ext["Flow"] = -ext["Amount"].astype(float)
+                flows = []
+                flows.append((start_prev.date(), -start_equity))
 
-            ext_daily = (
-                ext.assign(_d=ext["Date"].dt.date)
-                .groupby("_d", as_index=False)["Flow"]
-                .sum()
-                .rename(columns={"_d": "Date"})
-                .sort_values("Date")
-            )
+                ext = df_period[df_period["Type_norm"].isin(ext_types)].copy()
+                ext["Flow"] = -ext["Amount"].astype(float)
 
-            for row in ext_daily.itertuples(index=False):
-                dt = row.Date
-                if not isinstance(dt, datetime.date):
-                    dt = pd.Timestamp(dt).date()
-                flows.append((dt, float(row.Flow)))
+                ext_daily = (
+                    ext.assign(_d=ext["Date"].dt.date)
+                    .groupby("_d", as_index=False)["Flow"]
+                    .sum()
+                    .rename(columns={"_d": "Date"})
+                    .sort_values("Date")
+                )
 
-            flows.append((end_day.date(), +end_equity))
+                for row in ext_daily.itertuples(index=False):
+                    dt = row.Date
+                    if not isinstance(dt, datetime.date):
+                        dt = pd.Timestamp(dt).date()
+                    flows.append((dt, float(row.Flow)))
 
-            irr = _xirr(flows, guess=0.1)
+                flows.append((end_day.date(), +end_equity))
 
-            # ---- UI metrics ----
-            # r1c1, r1c2, r1c3, r1c4 = st.columns(4)
-            # r1c1.metric("Sum of deposits (Deposit + Transfer-in)", f"{deposits_sum:,.2f} USD")
-            # r1c2.metric("Sum of dividends", f"{dividends_sum:,.2f} USD")
-            # r1c3.metric("Dividend withholding tax (net)", f"{(-withholding_tax_sum):,.2f} USD")
-            # r1c4.metric("Free-funds interest (net)", f"{ff_interest_net:,.2f} USD")
-            #
-            # r2c1, r2c2 = st.columns(2)
-            # r2c1.metric("Simple return", f"{(simple_return*100):.2f}%" if np.isfinite(simple_return) else "n/a")
-            # r2c2.metric("XIRR (money-weighted)", f"{(irr*100):.2f}%" if irr is not None else "n/a")
+                irr = _xirr(flows, guess=0.1)
 
-            # ---- UI metrics (3-column layout) ----
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Sum of deposits (Deposit + Transfer-in)", f"{deposits_sum:,.2f} USD")
+                c2.metric("Sum of dividends", f"{dividends_sum:,.2f} USD")
+                c3.metric("Dividend withholding tax (net)", f"{(-withholding_tax_sum):,.2f} USD")
 
-            # Row 1: cash ops summary
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Sum of deposits (Deposit + Transfer-in)", f"{deposits_sum:,.2f} USD")
-            c2.metric("Sum of dividends", f"{dividends_sum:,.2f} USD")
-            c3.metric("Dividend withholding tax (net)", f"{(-withholding_tax_sum):,.2f} USD")
+                c4, c5, c6 = st.columns(3)
+                c4.metric("Free-funds interest (net)", f"{ff_interest_net:,.2f} USD")
+                c5.metric(f"Start equity (end of {start_prev.date()})", f"{start_equity:,.2f} USD")
+                c6.metric(f"End equity (end of {end_day.date()})", f"{end_equity:,.2f} USD")
 
-            # Row 2: interest + equity endpoints
-            c4, c5, c6 = st.columns(3)
-            c4.metric("Free-funds interest (net)", f"{ff_interest_net:,.2f} USD")
-            c5.metric(f"Start equity (end of {start_prev.date()})", f"{start_equity:,.2f} USD")
-            c6.metric(f"End equity (end of {end_day.date()})", f"{end_equity:,.2f} USD")
+                c7, c8, c9 = st.columns(3)
+                c7.metric("Net external cashflow (deposit+transfer+withdrawal)", f"{float(net_contrib):,.2f} USD")
+                c8.metric("Simple return", f"{(simple_return * 100):.2f}%" if np.isfinite(simple_return) else "n/a")
+                c9.metric("XIRR (money-weighted)", f"{(irr * 100):.2f}%" if irr is not None else "n/a")
 
-            # Row 3: returns
-            c7, c8, c9 = st.columns(3)
-            c7.metric("Net external cashflow (deposit+transfer+withdrawal)", f"{float(net_contrib):,.2f} USD")
-            c8.metric("Simple return", f"{(simple_return * 100):.2f}%" if np.isfinite(simple_return) else "n/a")
-            c9.metric("XIRR (money-weighted)", f"{(irr * 100):.2f}%" if irr is not None else "n/a")
+                with st.expander("Details (optional)"):
+                    st.write(f"Start equity (end of {start_prev.date()}): {start_equity:,.2f} USD")
+                    st.write(f"End equity (end of {end_day.date()}): {end_equity:,.2f} USD")
+                    st.write(f"Net external cashflow in period (deposit+transfer+withdrawal): {net_contrib:,.2f} USD")
 
-            with st.expander("Details (optional)"):
-                st.write(f"Start equity (end of {start_prev.date()}): {start_equity:,.2f} USD")
-                st.write(f"End equity (end of {end_day.date()}): {end_equity:,.2f} USD")
-                st.write(f"Net external cashflow in period (deposit+transfer+withdrawal): {net_contrib:,.2f} USD")
+                    if missing_prices:
+                        st.warning(
+                            "Missing prices for: "
+                            + ", ".join(missing_prices[:30])
+                            + (" ..." if len(missing_prices) > 30 else "")
+                        )
 
-                if missing_prices:
-                    st.warning(
-                        "Missing prices for: "
-                        + ", ".join(missing_prices[:30])
-                        + (" ..." if len(missing_prices) > 30 else "")
-                    )
+                    st.markdown("**Daily external flows used for XIRR**")
+                    st.dataframe(ext_daily, use_container_width=True)
 
-                st.markdown("**Daily external flows used for XIRR**")
-                st.dataframe(ext_daily, use_container_width=True)
-
-                st.markdown("**Cash operations (latest 200 in selected range)**")
-                cols_show = [c for c in ["Time", "Type", "Symbol", "Amount", "Comment"] if c in df_period.columns]
-                show_ops = df_period[cols_show].sort_values("Time", ascending=False).head(200)
-                st.dataframe(show_ops, use_container_width=True)
+                    st.markdown("**Cash operations (latest 200 in selected range)**")
+                    cols_show = [c for c in ["Time", "Type", "Symbol", "Amount", "Comment"] if c in df_period.columns]
+                    show_ops = df_period[cols_show].sort_values("Time", ascending=False).head(200)
+                    st.dataframe(show_ops, use_container_width=True)
 
 
 
@@ -1330,11 +1305,7 @@ else:
     if df_closed.empty and (df_open is None or df_open.empty):
         st.warning("No positions found in the XTB report.")
     else:
-        # allowed symbols only from your price database (stock universe)
-        df_all_prices = load_forecast_data().copy()
-        df_all_prices["Stock"] = df_all_prices["Stock"].astype(str).str.strip().str.upper()
-        df_all_prices["Stock"] = df_all_prices["Stock"].str.replace(r"\.US$", "", regex=True)
-        allowed = set(df_all_prices["Stock"].dropna().unique().tolist())
+        allowed = load_stock_universe(data_version)
 
         dp, dropped_cnt = _prep_positions(df_closed, df_open, allowed)
 
@@ -1355,6 +1326,9 @@ else:
             holdings = holdings.loc[:, (holdings.abs().sum(axis=0) >= EPS)]
 
             holdings_all = holdings.copy()  # pełny zestaw do sumy Total
+            xtb_tickers = tuple(sorted(holdings_all.columns.tolist()))
+            xtb_history = load_portfolio_history(xtb_tickers, data_version).copy()
+            xtb_history_daily_last = _prepare_history_daily_last(xtb_history)
 
             # filter UI (optional): choose which tickers to show
             all_syms = list(holdings.columns)
@@ -1435,7 +1409,7 @@ st.header("Smart Score portfela (ważony wielkością pozycji)")
 if "holdings_all" not in locals() or holdings_all.empty:
     st.info("Brak danych o pozycjach z XTB. Najpierw wgraj pełny raport XLSX i upewnij się, że sekcja Holdings timeline działa.")
 else:
-    df_scores = load_forecast_data().copy()
+    df_scores = xtb_history_daily_last.copy()
     required_cols = {"Stock", "Date of record", "Smart Score"}
 
     if not required_cols.issubset(df_scores.columns):
@@ -1492,23 +1466,23 @@ else:
                 if plot_series.empty:
                     st.info("Nie udało się wyliczyć średniej ważonej Smart Score dla wybranego okresu.")
                 else:
-                    fig_score = go.Figure()
-                    fig_score.add_trace(go.Scatter(
-                        x=plot_series.index,
-                        y=plot_series.values,
-                        mode="lines+markers",
-                        name="Smart Score (ważony)",
-                        hovertemplate="%{x|%Y-%m-%d}<br>Smart Score: %{y:.2f}<extra></extra>"
-                    ))
-                    fig_score.update_layout(
-                        height=500,
-                        xaxis_title="Date",
-                        yaxis_title="Smart Score (weighted by position size)",
-                        margin=dict(t=20)
-                    )
+                    with performance_block("build_portfolio_smart_score_chart"):
+                        fig_score = go.Figure()
+                        fig_score.add_trace(go.Scatter(
+                            x=plot_series.index,
+                            y=plot_series.values,
+                            mode="lines+markers",
+                            name="Smart Score (ważony)",
+                            hovertemplate="%{x|%Y-%m-%d}<br>Smart Score: %{y:.2f}<extra></extra>"
+                        ))
+                        fig_score.update_layout(
+                            height=500,
+                            xaxis_title="Date",
+                            yaxis_title="Smart Score (weighted by position size)",
+                            margin=dict(t=20)
+                        )
                     st.plotly_chart(fig_score, use_container_width=True)
 
-                    # Small table for current portfolio composition (latest date in range)
                     latest_day = holdings_all.index.max()
                     latest_pos_abs = holdings_all.loc[latest_day].abs()
                     latest_pos_abs = latest_pos_abs[latest_pos_abs > 0]
@@ -1516,19 +1490,7 @@ else:
                     if not latest_pos_abs.empty:
                         score_latest = score_eval.loc[latest_day] if latest_day in score_eval.index else pd.Series(dtype=float)
                         score_map = score_latest.to_dict()
-
-                        # Latest available price per ticker (from forecast DB)
-                        df_prices_latest = load_forecast_data().copy()
-                        df_prices_latest["Date of record"] = pd.to_datetime(df_prices_latest["Date of record"], errors="coerce")
-                        df_prices_latest["Stock"] = (
-                            df_prices_latest["Stock"].astype(str).str.strip().str.upper()
-                                            .str.replace(r"\.US$", "", regex=True)
-                        )
-                        df_prices_latest["Price"] = pd.to_numeric(
-                            df_prices_latest["Price"].astype(str).str.replace(",", "."),
-                            errors="coerce"
-                        )
-                        df_prices_latest = df_prices_latest.dropna(subset=["Date of record", "Stock", "Price"])
+                        df_prices_latest = _build_latest_history_by_stock(xtb_history_daily_last)
                         latest_price_map = (
                             df_prices_latest.sort_values(["Stock", "Date of record"])
                                             .groupby("Stock", as_index=True)["Price"]
@@ -1734,31 +1696,10 @@ else:
     # ----------------------------
     # 1) Portfolio holdings value from your price DB
     # ----------------------------
-    df_prices = load_forecast_data().copy()
-    if "Date of record" not in df_prices.columns:
+    px_pivot = _build_price_pivot(xtb_history_daily_last)
+    if px_pivot.empty:
         st.warning("No 'Date of record' in your price database, cannot compute market value.")
     else:
-        df_prices["Date of record"] = pd.to_datetime(df_prices["Date of record"], errors="coerce")
-        df_prices["Date"] = df_prices["Date of record"].dt.normalize()
-
-        df_prices["Stock"] = df_prices["Stock"].astype(str).str.strip().str.upper()
-        df_prices["Stock"] = df_prices["Stock"].str.replace(r"\.US$", "", regex=True)
-
-        df_prices["Price"] = pd.to_numeric(
-            df_prices["Price"].astype(str).str.replace(",", "."),
-            errors="coerce"
-        ).fillna(0.0)
-
-        df_px_daily = (
-            df_prices
-            .dropna(subset=["Date", "Stock"])
-            .sort_values(["Stock", "Date of record"])
-            .groupby(["Date", "Stock"], as_index=False)
-            .last()
-        )
-
-        px_pivot = df_px_daily.pivot(index="Date", columns="Stock", values="Price").sort_index()
-
         px_eval = px_pivot.reindex(holdings_all.index).ffill()
         px_eval = px_eval.reindex(columns=holdings_all.columns).fillna(0.0)
 
@@ -2273,8 +2214,8 @@ df_portfolio_net["Volume"] = df_portfolio_net.apply(volume_with_sign, axis=1)
 df_portfolio_net = df_portfolio_net.groupby("Symbol", as_index=False).agg({"Volume": "sum"})
 df_portfolio_net["Symbol"] = df_portfolio_net["Symbol"].str.upper()  # standardization
 
-# 2) Prepare df_forecasts: we only take columns relevant to dividends
-df_div_full = df_forecasts[[
+# 2) Prepare dividend history for the current portfolio
+df_div_full = portfolio_history[[
     "Stock",
     "Dividend yield",
     "Ex-dividend date",
@@ -2312,7 +2253,6 @@ no_div_stocks = list(all_portfolio_symbols - stocks_with_positive_div)
 # 5) Filter only those with dividend > 0
 df_div = df_div[df_div["Dividend yield"] > 0]
 if df_div.empty:
-    # st.info("No dividend-paying stocks (or yield = 0).")
     if no_div_stocks:
         st.write("Stocks in your portfolio with no dividend:", ", ".join(no_div_stocks))
 else:
@@ -2327,17 +2267,7 @@ else:
         if no_div_stocks:
             st.write("Stocks with no dividend:", ", ".join(no_div_stocks))
     else:
-        df_price_latest = (
-            df_forecasts
-            .dropna(subset=["Stock", "Date of record", "Price"])
-            .copy()
-        )
-        df_price_latest["Price"] = (
-            df_price_latest["Price"].astype(str).str.replace(",", ".").astype(float, errors="ignore")
-        )
-        df_price_latest["Date of record"] = pd.to_datetime(df_price_latest["Date of record"], errors="coerce")
-        df_price_latest = df_price_latest.sort_values(["Stock", "Date of record"])
-        df_price_latest = df_price_latest.groupby("Stock", as_index=False).last()
+        df_price_latest = portfolio_history_latest[["Stock", "Price"]].copy()
 
         df_div = df_div.merge(
             df_price_latest[["Stock", "Price"]],
@@ -2354,48 +2284,47 @@ else:
 
         st.markdown("---")
         st.header("Dividend Timeline")
-        # st.write("""Each row is a separate (Ex-div date -> Dividend pay date).""")
+        with performance_block("build_portfolio_dividend_timeline"):
+            fig_timeline = px.timeline(
+                df_div,
+                x_start="Ex-dividend date",
+                x_end="Dividend pay date",
+                y="Stock",
+                hover_data={
+                    "Stock": True,
+                    "Ex-dividend date": "|%Y-%m-%d",
+                    "Dividend pay date": "|%Y-%m-%d",
+                    "Volume": ":.2f",
+                    "Dividend yield": ":.2%",
+                    "Annual Dividend (est.) USD": True
+                },
+                color="Stock",
+                title="Timeline: All Ex-Dividend & Dividend Pay Dates"
+            )
 
-        fig_timeline = px.timeline(
-            df_div,
-            x_start="Ex-dividend date",
-            x_end="Dividend pay date",
-            y="Stock",
-            hover_data={
-                "Stock": True,
-                "Ex-dividend date": "|%Y-%m-%d",
-                "Dividend pay date": "|%Y-%m-%d",
-                "Volume": ":.2f",
-                "Dividend yield": ":.2%",
-                "Annual Dividend (est.) USD": True
-            },
-            color="Stock",
-            title="Timeline: All Ex-Dividend & Dividend Pay Dates"
-        )
-
-        today = pd.Timestamp.now().floor("D")
-        fig_timeline.update_xaxes(
-            tickformat="%Y-%m-%d",
-            range=[
-                today - pd.DateOffset(days=30),
-                today + pd.DateOffset(days=90)
-            ]
-        )
-        fig_timeline.update_layout(
-            xaxis=dict(title="Date"),
-            yaxis=dict(title="Stock"),
-            height=600,
-            dragmode="pan",
-            showlegend=False
-        )
-        fig_timeline.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,0.2)")
-        fig_timeline.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.2)")
-        fig_timeline.add_vline(
-            x=today,
-            line_width=2,
-            line_dash="solid",
-            line_color="rgba(255,255,255,0.9)"
-        )
+            today = pd.Timestamp.now().floor("D")
+            fig_timeline.update_xaxes(
+                tickformat="%Y-%m-%d",
+                range=[
+                    today - pd.DateOffset(days=30),
+                    today + pd.DateOffset(days=90)
+                ]
+            )
+            fig_timeline.update_layout(
+                xaxis=dict(title="Date"),
+                yaxis=dict(title="Stock"),
+                height=600,
+                dragmode="pan",
+                showlegend=False
+            )
+            fig_timeline.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,0.2)")
+            fig_timeline.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.2)")
+            fig_timeline.add_vline(
+                x=today,
+                line_width=2,
+                line_dash="solid",
+                line_color="rgba(255,255,255,0.9)"
+            )
 
 
         if not df_div.empty:
@@ -2617,13 +2546,6 @@ else:
             ])
         )
 
-        # # ------------------------------------------------------
-        # # 5) Wyświetlenie
-        # # ------------------------------------------------------
-        # st.markdown(styled.to_html(), unsafe_allow_html=True)
-        # ——————————————————————————————————————————————————————————————————
-        # 4-b) Wyświetlenie w 4 kolumnach według sygnału
-        # ——————————————————————————————————————————————————————————————————
         signals = ["hold", "sell", "strong sell", "very strong sell"]
         labels = {
             "hold": "Hold/Buy More",
@@ -2677,9 +2599,8 @@ st.markdown("<hr>", unsafe_allow_html=True)
 
 
 # ============================
-#  CORRELATION MAP (from df_forecasts) — with ordering
+#  CORRELATION MAP (portfolio) — with ordering
 # ============================
-# st.markdown("---")
 st.header("Correlation map (portfolio)")
 
 # 0) Zbierz tickery z aktualnego portfolio (netto != 0)
@@ -2701,30 +2622,6 @@ else:
     if len(tickers) < 2:
         st.info("Need at least two tickers with non-zero net volume.")
     else:
-        # 1) UI
-        # c1, c2, c3, c4 = st.columns([1,1,1,1])
-        # with c1:
-        #     window_rows = c1.selectbox("Window (last N trading rows)", [60, 120, 250], index=1)
-        # with c2:
-        #     ret_kind = c2.selectbox("Returns", ["Percent (pct_change)", "Log (diff of log)"], index=0)
-        # with c3:
-        #     corr_kind = c3.selectbox("Correlation", ["Pearson", "Spearman", "Kendall", "Up/Down (sign Pearson)"], index=0)
-        #
-        # # Czy jest scipy? (opcjonalny tryb hierarchiczny)
-        # try:
-        #     import scipy.cluster.hierarchy as sch
-        #     have_scipy = True
-        # except Exception:
-        #     have_scipy = False
-        #
-        # order_options = ["Original", "Cluster similar (spectral)"]
-        # if have_scipy:
-        #     order_options.append("Cluster similar (hierarchical)")
-        #
-        # with c4:
-        #     order_mode = c4.selectbox("Order heatmap", order_options, index=1)
-
-        # 1) UI (2×2)
         row1_col1, row1_col2 = st.columns(2)
         with row1_col1:
             window_rows = st.selectbox(
@@ -2765,31 +2662,7 @@ else:
                 index=1 if "Cluster similar (spectral)" in order_options else 0
             )
 
-        # 2) Przygotuj ceny z df_forecasts
-        df_all = df_forecasts.copy()
-        df_all["Stock"] = df_all["Stock"].astype(str).str.upper()
-        df_all["Date of record"] = pd.to_datetime(df_all["Date of record"], errors="coerce")
-
-        # Price -> float (czyścimy)
-        price_str = (
-            df_all["Price"]
-              .astype(str)
-              .str.replace("\u00A0", " ", regex=False)
-              .str.replace(",", "", regex=False)
-              .str.replace(r"[^0-9.\-]", "", regex=True)
-        )
-        df_all["Price"] = pd.to_numeric(price_str, errors="coerce")
-        df_all = df_all.dropna(subset=["Date of record", "Price"])
-
-        # Ostatni rekord w danym dniu
-        sort_keys = ["Stock", "Date of record"]
-        if "Time of record" in df_all.columns:
-            df_all["Time of record"] = df_all["Time of record"].astype(str)
-            sort_keys.append("Time of record")
-        df_all = df_all.sort_values(sort_keys)
-        df_daily_last = df_all.groupby(["Date of record", "Stock"], as_index=False).last()
-
-        # Pivot
+        df_daily_last = portfolio_history_daily_last.copy()
         wide = (
             df_daily_last
             .pivot(index="Date of record", columns="Stock", values="Price")
@@ -2855,16 +2728,17 @@ else:
 
                 # 6) Heatmapa
                 st.subheader("Correlation heatmap")
-                fig_hm = px.imshow(
-                    C,
-                    zmin=-1, zmax=1,
-                    color_continuous_scale="RdBu_r",
-                    aspect="auto",
-                    labels=dict(color="corr"),
-                    title=f"{corr_kind} on {ret_kind.split()[0].lower()} returns · last {len(wide)} rows",
-                    text_auto=False,
-                )
-                fig_hm.update_layout(margin=dict(t=40, r=10, b=10, l=10), height=520)
+                with performance_block("build_portfolio_correlation_heatmap"):
+                    fig_hm = px.imshow(
+                        C,
+                        zmin=-1, zmax=1,
+                        color_continuous_scale="RdBu_r",
+                        aspect="auto",
+                        labels=dict(color="corr"),
+                        title=f"{corr_kind} on {ret_kind.split()[0].lower()} returns · last {len(wide)} rows",
+                        text_auto=False,
+                    )
+                    fig_hm.update_layout(margin=dict(t=40, r=10, b=10, l=10), height=520)
                 st.plotly_chart(fig_hm, use_container_width=True)
 
                 # 7) Top neg/pos pary (na nieuporządkowanej wartości C — to bez znaczenia dla zestawienia)
@@ -2882,15 +2756,6 @@ else:
                 with col_right:
                     st.markdown("**Most positive correlations**")
                     st.table(pd.DataFrame(pairs_sorted[-10:][::-1], columns=["A", "B", "corr"]))
-
-                # # 8) Pobranie CSV
-                # st.download_button(
-                #     "Download correlation matrix (CSV)",
-                #     data=C.to_csv().encode(),
-                #     file_name=f"correlation_{corr_kind.lower()}_{len(wide)}rows.csv",
-                #     mime="text/csv"
-                # )
-
 
 # ============================
 #  AI PORTFOLIO COMMENTARY (RAG-style prompt → OpenAI)
@@ -2956,7 +2821,6 @@ def check_section_access(section_key: str) -> bool:
     return False
 
 st.markdown("<hr>", unsafe_allow_html=True)
-# st.markdown("---")
 st.header("AI portfolio commentary")
 
 # ---- USE: wrap your AI commentary section with the gate ----
@@ -2971,6 +2835,8 @@ if check_section_access("portfolio_ai_comment"):
         # ——— Guardrails / data requirements ———
         if portfolio_df.empty:
             st.info("Your portfolio is empty — add/upload positions first.")
+        elif filtered_data.empty:
+            st.info("No forecast data available for the selected date.")
         elif "Stock" not in filtered_data.columns:
             st.info("No forecast universe loaded for the selected date.")
         else:
@@ -3269,30 +3135,12 @@ else:
     st.stop()  # stop rendering the rest of the page below this section (optional)
 
 
-
-
 st.markdown("<hr>", unsafe_allow_html=True)
 
 st.markdown("""\
 Please note: Investing involves risk and you may lose some or all of your capital. 
 This site is provided for informational purposes only and does not constitute financial advice.
 """)
-# st.markdown("<hr>", unsafe_allow_html=True)
-
-st.markdown("""
-    <p style="font-size: 12px; text-align: left; color: gray;">
-        Website made by @Michał Ostaszewski
-    </p>
-""", unsafe_allow_html=True)
-
-
-st.markdown("<hr>", unsafe_allow_html=True)
-
-st.markdown("""\
-Please note: Investing involves risk and you may lose some or all of your capital. 
-This site is provided for informational purposes only and does not constitute financial advice.
-""")
-# st.markdown("<hr>", unsafe_allow_html=True)
 
 st.markdown("""
     <p style="font-size: 12px; text-align: left; color: gray;">

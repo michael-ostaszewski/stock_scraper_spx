@@ -12,7 +12,6 @@ from stock_forecaster_data import (
     load_daily_market_metrics,
     load_day_snapshot,
     load_selected_stocks_daily_metrics,
-    load_turtle_signals,
     performance_block,
 )
 
@@ -1271,62 +1270,6 @@ else:
         )
         st.dataframe(out, use_container_width=True)
 
-
-st.markdown("<hr>", unsafe_allow_html=True)
-
-
-# -------------------------------------------------
-# Donchian-Turtle Signals ─ All Stocks, Selected Date
-# -------------------------------------------------
-st.header("Turtle Strategy Signals – Entire S&P 500 (Selected Date)")
-
-# ── 1 ▸ user selector (default = Filtered) ──────────────────────────
-mode = st.selectbox(
-    "Signal view:",
-    ("Filtered signals (default)", "All signals"),
-    index=0,
-    help="Filtered – tylko pierwsze BUY po wejściu i pierwsze SELL po wyjściu.\nAll – każdy sygnał wybicia / wybicia w dół."
-)
-mode_key = "filtered" if "Filtered" in mode else "all"
-
-today_df = load_turtle_signals(selected_date_ts, mode_key, data_version)
-
-if today_df.empty:
-    buy_df = pd.DataFrame(columns=["Stock", "Sector", "Price", "High20_y", "Signal"])
-    sell_df = pd.DataFrame(columns=["Stock", "Sector", "Price", "Low10_y", "Signal"])
-else:
-    buy_df = today_df[today_df["Signal"] == "BUY"].copy()
-    sell_df = today_df[today_df["Signal"] == "SELL"].copy()
-
-# ── 2 ▸ headline counters ───────────────────────────────────────────
-col_b, col_s = st.columns(2)
-col_b.metric("BUY signals today", len(buy_df))
-col_s.metric("SELL signals today", len(sell_df))
-
-
-# ── 3 ▸ helper to print tables ──────────────────────────────────────
-def show_table(df_sig, sig_type):
-    if df_sig.empty:
-        st.info(f"No {sig_type} signals for the selected date.")
-        return
-    cols = ["Stock", "Sector", "Price",
-            "High20_y" if sig_type == "BUY" else "Low10_y"]
-    rename = {
-        "Price": "Close",
-        "High20_y": "Y-day 20-day High",
-        "Low10_y": "Y-day 10-day Low"
-    }
-    out = (df_sig[cols]
-           .rename(columns=rename)
-           .sort_values("Stock")
-           .round(2)
-           .reset_index(drop=True))
-    st.subheader(f"{sig_type} signals")
-    st.dataframe(out, use_container_width=True)
-
-
-show_table(buy_df, "BUY")
-show_table(sell_df, "SELL")
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
