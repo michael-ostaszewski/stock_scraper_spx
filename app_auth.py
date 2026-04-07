@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import secrets
 import time
 from typing import Any
@@ -10,13 +9,11 @@ from urllib.parse import urlencode
 
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 
 
 AUTH_SESSION_KEY = "supabase_auth_session"
-AUTH_GOOGLE_FLOW_KEY = "supabase_google_oauth_flow"
 AUTH_FLASH_ERROR_KEY = "supabase_auth_flash_error"
-OAUTH_QUERY_PARAMS = ("code", "state", "error", "error_code", "error_description")
+GOOGLE_FLOW_TTL_SECONDS = 900
 
 
 class AuthError(RuntimeError):
@@ -118,7 +115,6 @@ def _store_session(payload: dict[str, Any]):
 
 def clear_auth_session():
     st.session_state.pop(AUTH_SESSION_KEY, None)
-    st.session_state.pop(AUTH_GOOGLE_FLOW_KEY, None)
 
 
 def get_session_user() -> dict[str, Any] | None:
@@ -231,6 +227,36 @@ def _build_pkce_code_challenge(code_verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
 
 
+@st.cache_resource
+def _google_oauth_flow_store() -> dict[str, dict[str, Any]]:
+    return {}
+
+
+def _cleanup_google_oauth_flows():
+    store = _google_oauth_flow_store()
+    now = int(time.time())
+    expired_states = [
+        state
+        for state, payload in store.items()
+        if int(payload.get("created_at") or 0) < now - GOOGLE_FLOW_TTL_SECONDS
+    ]
+    for state in expired_states:
+        store.pop(state, None)
+
+
+def _store_google_oauth_flow(state: str, code_verifier: str):
+    _cleanup_google_oauth_flows()
+    _google_oauth_flow_store()[state] = {
+        "code_verifier": code_verifier,
+        "created_at": int(time.time()),
+    }
+
+
+def _pop_google_oauth_flow(state: str) -> dict[str, Any] | None:
+    _cleanup_google_oauth_flows()
+    return _google_oauth_flow_store().pop(state, None)
+
+
 def build_google_oauth_url() -> str:
     cfg = _auth_config()
     redirect_to = _oauth_app_url()
@@ -238,12 +264,7 @@ def build_google_oauth_url() -> str:
     state = secrets.token_urlsafe(32)
     code_challenge = _build_pkce_code_challenge(code_verifier)
 
-    st.session_state[AUTH_GOOGLE_FLOW_KEY] = {
-        "state": state,
-        "code_verifier": code_verifier,
-        "redirect_to": redirect_to,
-        "created_at": int(time.time()),
-    }
+    _store_google_oauth_flow(state, code_verifier)
 
     params = {
         "provider": "google",
@@ -283,22 +304,19 @@ def handle_oauth_callback() -> bool:
     if error:
         message = error_description or error or "Google sign-in was cancelled."
         _set_flash_error(message)
-        st.session_state.pop(AUTH_GOOGLE_FLOW_KEY, None)
         _clear_oauth_query_params()
         _safe_rerun()
         return True
 
-    flow = st.session_state.get(AUTH_GOOGLE_FLOW_KEY)
+    flow = _pop_google_oauth_flow(state)
     if not isinstance(flow, dict):
         _set_flash_error("Missing Google sign-in state. Start the Google flow again.")
         _clear_oauth_query_params()
         _safe_rerun()
         return True
 
-    expected_state = str(flow.get("state") or "")
-    if not state or not expected_state or state != expected_state:
+    if not state:
         _set_flash_error("Google sign-in state mismatch. Start the Google flow again.")
-        st.session_state.pop(AUTH_GOOGLE_FLOW_KEY, None)
         _clear_oauth_query_params()
         _safe_rerun()
         return True
@@ -306,7 +324,6 @@ def handle_oauth_callback() -> bool:
     code_verifier = str(flow.get("code_verifier") or "")
     if not code_verifier or not code:
         _set_flash_error("Missing OAuth callback data. Start the Google flow again.")
-        st.session_state.pop(AUTH_GOOGLE_FLOW_KEY, None)
         _clear_oauth_query_params()
         _safe_rerun()
         return True
@@ -315,13 +332,11 @@ def handle_oauth_callback() -> bool:
         payload = _exchange_google_code_for_session(code, code_verifier)
     except AuthError as exc:
         _set_flash_error(f"Google sign-in failed: {exc}")
-        st.session_state.pop(AUTH_GOOGLE_FLOW_KEY, None)
         _clear_oauth_query_params()
         _safe_rerun()
         return True
 
     _store_session(payload)
-    st.session_state.pop(AUTH_GOOGLE_FLOW_KEY, None)
     _clear_oauth_query_params()
     _safe_rerun()
     return True
@@ -378,23 +393,19 @@ def _render_login_screen(page_label: str | None = None):
         unsafe_allow_html=True,
     )
 
-    google_clicked = st.button("Sign in with Google", key="auth_google_sign_in", use_container_width=True)
-    if google_clicked:
-        try:
-            redirect_url = start_google_sign_in()
-        except AuthError as exc:
-            st.error(f"Google sign-in setup error: {exc}")
-        else:
-            components.html(
-                f"""
-                <script>
-                    window.parent.location.href = {json.dumps(redirect_url)};
-                </script>
-                """,
-                height=0,
+    try:
+        redirect_url = start_google_sign_in()
+    except AuthError as exc:
+        st.error(f"Google sign-in setup error: {exc}")
+    else:
+        if hasattr(st, "link_button"):
+            st.link_button(
+                "Sign in with Google",
+                redirect_url,
+                use_container_width=True,
             )
-            st.caption("Redirecting to Google...")
-            st.stop()
+        else:
+            st.markdown(f"[Sign in with Google]({redirect_url})")
 
 
 def _render_auth_sidebar():
