@@ -274,43 +274,47 @@ def _google_oauth_flow_store() -> dict[str, dict[str, Any]]:
 def _cleanup_google_oauth_flows():
     store = _google_oauth_flow_store()
     now = int(time.time())
-    expired_states = [
-        state
-        for state, payload in store.items()
+    expired_flow_ids = [
+        flow_id
+        for flow_id, payload in store.items()
         if int(payload.get("created_at") or 0) < now - GOOGLE_FLOW_TTL_SECONDS
     ]
-    for state in expired_states:
-        store.pop(state, None)
+    for flow_id in expired_flow_ids:
+        store.pop(flow_id, None)
 
 
-def _store_google_oauth_flow(state: str, code_verifier: str):
+def _store_google_oauth_flow(flow_id: str, code_verifier: str):
     _cleanup_google_oauth_flows()
-    _google_oauth_flow_store()[state] = {
+    _google_oauth_flow_store()[flow_id] = {
         "code_verifier": code_verifier,
         "created_at": int(time.time()),
     }
 
 
-def _pop_google_oauth_flow(state: str) -> dict[str, Any] | None:
+def _pop_google_oauth_flow(flow_id: str) -> dict[str, Any] | None:
     _cleanup_google_oauth_flows()
-    return _google_oauth_flow_store().pop(state, None)
+    return _google_oauth_flow_store().pop(flow_id, None)
+
+
+def _build_google_redirect_url(flow_id: str) -> str:
+    redirect_to = _oauth_app_url()
+    separator = "&" if "?" in redirect_to else "?"
+    return f"{redirect_to}{separator}google_flow_id={flow_id}"
 
 
 def build_google_oauth_url() -> str:
     cfg = _auth_config()
-    redirect_to = _oauth_app_url()
     code_verifier = _build_pkce_code_verifier()
-    state = secrets.token_urlsafe(32)
+    flow_id = secrets.token_urlsafe(24)
     code_challenge = _build_pkce_code_challenge(code_verifier)
 
-    _store_google_oauth_flow(state, code_verifier)
+    _store_google_oauth_flow(flow_id, code_verifier)
 
     params = {
         "provider": "google",
-        "redirect_to": redirect_to,
+        "redirect_to": _build_google_redirect_url(flow_id),
         "code_challenge": code_challenge,
         "code_challenge_method": "s256",
-        "state": state,
     }
     return f"{cfg['base_url']}/auth/v1/authorize?{urlencode(params)}"
 
@@ -333,7 +337,7 @@ def _exchange_google_code_for_session(auth_code: str, code_verifier: str) -> dic
 
 def handle_oauth_callback() -> bool:
     code = _query_param("code")
-    state = _query_param("state")
+    flow_id = _query_param("google_flow_id")
     error = _query_param("error")
     error_description = _query_param("error_description")
 
@@ -347,15 +351,15 @@ def handle_oauth_callback() -> bool:
         _safe_rerun()
         return True
 
-    flow = _pop_google_oauth_flow(state)
+    flow = _pop_google_oauth_flow(flow_id)
     if not isinstance(flow, dict):
-        _set_flash_error("Missing Google sign-in state. Start the Google flow again.")
+        _set_flash_error("Missing Google sign-in flow. Start the Google flow again.")
         _clear_oauth_query_params()
         _safe_rerun()
         return True
 
-    if not state:
-        _set_flash_error("Google sign-in state mismatch. Start the Google flow again.")
+    if not flow_id:
+        _set_flash_error("Google sign-in flow mismatch. Start the Google flow again.")
         _clear_oauth_query_params()
         _safe_rerun()
         return True
