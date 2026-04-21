@@ -1,0 +1,56 @@
+# OS / editor / local env
+.DS_Store
+.idea/
+.vscode/
+.env
+.env.*
+.venv/
+venv/
+.scrapers/
+.stocks/
+
+# Python cache / build
+__pycache__/
+*/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Streamlit local secrets
+.streamlit/secrets.toml
+
+# Temporary download/upload artifacts
+.tmp.drivedownload/
+.tmp.driveupload/
+_tmp_downloads/
+
+# Notebooks and notebook outputs
+*.ipynb
+.ipynb_checkpoints/
+JupyterNotebooks/
+
+# Large local data folders / files (not for GitHub)
+Index data/
+Index Data/
+Crypto Data/
+Stocks fv/
+US ticker lists/
+Russel 1000 Symbols/
+symulacje/
+old_test pages/
+stocks/
+stock_info.csv
+tradingviewlinks.csv
+Index Data - Yahoo FInance data base.csv
+S&P 500 Historical Data from 1980.csv
+
+# Local analytics artifacts
+/*.png
+*.html
+
+# Scrapers (docelowo poza repo appki)
+scrapers/
+Stock_scraper_*.py
+Schedule_scraper.py
+Index_scraper_inv.py
+bitcoin_price_scraper.py
