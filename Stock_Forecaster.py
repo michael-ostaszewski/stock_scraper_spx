@@ -10,6 +10,7 @@ import numpy as np
 from app_auth import require_auth
 from stock_forecaster_data import (
     get_last_date,
+    load_fear_greed_timeseries,
     load_daily_market_metrics,
     load_day_snapshot,
     load_selected_stocks_daily_metrics,
@@ -76,6 +77,7 @@ selected_date_ts = pd.Timestamp(selected_date)
 
 filtered_data = load_day_snapshot(selected_date_ts, data_version)
 daily_metrics = load_daily_market_metrics(data_version)
+fear_greed_timeseries = load_fear_greed_timeseries(data_version)
 unique_dates = sorted(daily_metrics["Date of record"].dropna().unique()) if "Date of record" in daily_metrics.columns else []
 
 # ---------------
@@ -930,7 +932,7 @@ The Fear & Greed Index quantifies investor emotions—high values suggest excess
 while low values indicate heightened fear. Monitoring these trends can help identify shifts in market sentiment,
 potentially signaling upcoming changes in market behavior.""")
 
-df_fgi = daily_metrics[["Date of record", "Fear & Greed Index"]].dropna(subset=["Date of record"])
+df_fgi = fear_greed_timeseries[["Date of record", "Fear & Greed Index"]].dropna(subset=["Date of record"])
 with performance_block("build_fear_greed_chart"):
     fig_line_fgi = px.line(
         df_fgi,

@@ -5,10 +5,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import date
 from app_auth import require_auth
-
-RAW_GITHUB_URL = (
-    "/Users/michal/PycharmProjects/Stock Scraper/Index data/Clear_index_data/S&P 500 Historical Data from 1980 - with metrics.csv"
-)
+from sp500_index_analyzer_data import load_sp500_historical_metrics
 
 require_auth("S&P 500 index analyzer")
 
@@ -44,13 +41,41 @@ st.title("📈 S&P 500 – historia, korekty i statystyki")
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. LOAD DATA
 # ─────────────────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner="Pobieram dane CSV…")
-def load_data(url: str) -> pd.DataFrame:
-    df = pd.read_csv(url, parse_dates=["Date"])
-    df = df.sort_values("Date").reset_index(drop=True)
-    return df
+try:
+    df = load_sp500_historical_metrics()
+except Exception as exc:
+    st.error(f"Could not load S&P 500 historical metrics from database: {exc}")
+    st.stop()
 
-df = load_data(RAW_GITHUB_URL)
+required_columns = {
+    "Date",
+    "Price",
+    "Open",
+    "High",
+    "Low",
+    "ATH_price",
+    "days_since_ATH",
+    "pct_from_ATH",
+    "daily_return_pct",
+    "vol_30d_ann",
+    "return_1y_pct",
+    "dist_from_SMA_50_pct",
+    "dist_from_SMA_100_pct",
+    "dist_from_SMA_200_pct",
+    "roll_sharpe",
+    "roll_sortino",
+    "drawdown_pct",
+    "ulcer_252d",
+}
+
+if df.empty:
+    st.error("No S&P 500 historical metrics found in database.")
+    st.stop()
+
+missing_columns = sorted(required_columns - set(df.columns))
+if missing_columns:
+    st.error(f"Missing required columns in database dataset: {missing_columns}")
+    st.stop()
 
 # # ─────────────────────────────────────────────────────────────────────────────
 # # 3. PODSTAWOWY LINIOWY WYKRES CENY

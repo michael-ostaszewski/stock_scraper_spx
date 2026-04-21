@@ -5,6 +5,10 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+import requests
+from io import StringIO
+from collections.abc import Mapping
+from pandas.errors import ParserError
 from pandas.tseries.offsets import BDay
 from datetime import date, timedelta
 from app_auth import require_auth
@@ -37,30 +41,136 @@ st.markdown(
 st.header("Monte Carlo Simulator (GBM) for US Stocks")
 
 # ---------- Data loaders ----------
+def _resolve_stooq_apikey() -> str:
+    candidates = []
+    cfg = st.secrets.get("stooq", {})
+    if isinstance(cfg, Mapping) or hasattr(cfg, "get"):
+        candidates.extend([cfg.get("apikey"), cfg.get("api_key"), cfg.get("key")])
+    candidates.extend([
+        st.secrets.get("STOOQ_API_KEY"),
+        st.secrets.get("stooq_api_key"),
+        st.secrets.get("stooq_apikey"),
+    ])
+    for val in candidates:
+        if val is None:
+            continue
+        text = str(val).strip()
+        if text:
+            return text
+    return ""
+
+
+def _to_yf_ticker(symbol_stooq: str) -> str:
+    t = str(symbol_stooq).strip().lower()
+    if t.endswith(".us"):
+        t = t[:-3]
+    return t.replace("-", ".").upper()
+
+
+def _download_stooq_csv(symbol_stooq: str, interval: str = "d") -> pd.DataFrame:
+    apikey = _resolve_stooq_apikey()
+    url = f"https://stooq.com/q/d/l/?s={symbol_stooq}&i={interval}"
+    if apikey:
+        url = f"{url}&apikey={apikey}"
+
+    resp = requests.get(url, timeout=20)
+    resp.raise_for_status()
+    payload = resp.text
+
+    if "Get your apikey" in payload and "get_apikey" in payload:
+        raise ValueError(
+            "Stooq requires an API key for CSV download. "
+            "Add `stooq.apikey` (or `STOOQ_API_KEY`) to `.streamlit/secrets.toml`."
+        )
+
+    try:
+        df = pd.read_csv(StringIO(payload))
+    except ParserError as exc:
+        preview = "\n".join(payload.splitlines()[:7])
+        raise ValueError(
+            "Stooq returned a non-CSV response. "
+            f"First lines:\n{preview}"
+        ) from exc
+
+    if df.empty or "Date" not in df.columns:
+        raise ValueError("Stooq returned empty or malformed CSV payload.")
+    return df
+
+
+def _download_yfinance_csv(symbol_stooq: str, interval: str = "d") -> pd.DataFrame:
+    try:
+        import yfinance as yf
+    except Exception as exc:
+        raise ValueError(
+            "yfinance fallback is unavailable (module not installed)."
+        ) from exc
+
+    ticker_yf = _to_yf_ticker(symbol_stooq)
+    interval_map = {"d": "1d", "w": "1wk", "m": "1mo"}
+    interval_yf = interval_map.get(interval, "1d")
+    df = yf.download(
+        ticker_yf,
+        period="max",
+        interval=interval_yf,
+        auto_adjust=False,
+        progress=False,
+        threads=False,
+    )
+    if df is None or df.empty:
+        raise ValueError(f"No data from Yahoo Finance for ticker: {ticker_yf}")
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df = df.reset_index()
+
+    if "Date" not in df.columns:
+        if "Datetime" in df.columns:
+            df = df.rename(columns={"Datetime": "Date"})
+        else:
+            df = df.rename(columns={df.columns[0]: "Date"})
+
+    if "Volume" not in df.columns:
+        df["Volume"] = np.nan
+
+    required = {"Date", "Open", "High", "Low", "Close", "Volume"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Yahoo Finance payload missing columns: {sorted(missing)}")
+    return df[["Date", "Open", "High", "Low", "Close", "Volume"]].copy()
+
+
+def _load_ohlc_with_fallback(symbol_stooq: str, interval: str = "d") -> pd.DataFrame:
+    errors: list[str] = []
+    for source in ("stooq", "yfinance"):
+        try:
+            df = (
+                _download_stooq_csv(symbol_stooq, interval)
+                if source == "stooq"
+                else _download_yfinance_csv(symbol_stooq, interval)
+            )
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+            df = df.dropna(subset=["Date"]).sort_values("Date").set_index("Date")
+            return df
+        except Exception as exc:
+            errors.append(f"{source}: {exc}")
+    raise ValueError("Failed to download OHLC data. " + " | ".join(errors))
+
+
 @st.cache_data(show_spinner=False)
 def load_stooq_ohlc(symbol_stooq: str, interval: str = "d") -> pd.DataFrame:
     """
     Downloads OHLCV from Stooq. Interval: 'd' (daily), 'w' (weekly), 'm' (monthly).
     Returns DF indexed by Date with columns: Open, High, Low, Close, Volume
     """
-    url = f"https://stooq.com/q/d/l/?s={symbol_stooq}&i={interval}"
-    df = pd.read_csv(url)
-    if df.empty or "Date" not in df.columns:
-        return pd.DataFrame()
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.dropna(subset=["Date"]).sort_values("Date").set_index("Date")
-    return df
+    return _load_ohlc_with_fallback(symbol_stooq, interval=interval)
 
 @st.cache_data(show_spinner=False)
 def load_stooq_close(symbol_stooq: str) -> pd.Series:
     """Close-only helper for market (e.g., 'qqq.us')."""
-    url = f"https://stooq.com/q/d/l/?s={symbol_stooq}&i=d"
-    df = pd.read_csv(url)
-    if df.empty or "Date" not in df.columns or "Close" not in df.columns:
+    df = _load_ohlc_with_fallback(symbol_stooq, interval="d")
+    if df.empty or "Close" not in df.columns:
         return pd.Series(dtype=float)
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.dropna(subset=["Date", "Close"]).sort_values("Date").set_index("Date")
-    return df["Close"]
+    return df["Close"].dropna()
 
 # ---------- Sidebar / inputs ----------
 with st.sidebar:
@@ -79,7 +189,7 @@ with st.sidebar:
 interval_code = {"Daily (d)": "d", "Weekly (w)": "w", "Monthly (m)": "m"}[interval]
 
 # ---------- Load data ----------
-symbol_stooq = f"{ticker.lower()}.us"
+symbol_stooq = f"{ticker.strip().lower().replace('.', '-')}.us"
 prices = load_stooq_ohlc(symbol_stooq, interval=interval_code)
 
 if prices.empty:
@@ -242,12 +352,9 @@ def load_stooq_ohlcv(ticker: str, start=None, end=None, interval: str = "d") -> 
     interval: 'd' (daily), 'w' (weekly), 'm' (monthly)
     """
     symbol = to_stooq_symbol(ticker, suffix=".us")
-    url = f"https://stooq.com/q/d/l/?s={symbol}&i={interval}"
-    df = pd.read_csv(url)
+    df = _load_ohlc_with_fallback(symbol, interval=interval)
     if df.empty:
-        raise ValueError(f"No data from Stooq for symbol: {symbol} (URL: {url})")
-    df["Date"] = pd.to_datetime(df["Date"])
-    df = df.sort_values("Date").set_index("Date")
+        raise ValueError(f"No data for symbol: {symbol}")
     if start:
         df = df[df.index >= pd.to_datetime(start)]
     if end:
@@ -259,9 +366,10 @@ def load_stooq_close(symbol_stooq: str) -> pd.Series:
     """
     Helper: fetch daily Close by Stooq symbol (e.g., 'qqq.us').
     """
-    url = f"https://stooq.com/q/d/l/?s={symbol_stooq}&i=d"
-    s = pd.read_csv(url, parse_dates=['Date']).set_index('Date').sort_index()['Close'].dropna()
-    return s
+    df = _load_ohlc_with_fallback(symbol_stooq, interval="d")
+    if df.empty or "Close" not in df.columns:
+        return pd.Series(dtype=float)
+    return df["Close"].dropna()
 
 # ---------- UI: Inputs ----------
 with st.expander("Settings", expanded=True):
@@ -501,4 +609,3 @@ st.caption(
     "It ignores jumps, stochastic volatility, dividends, splits alignment, and other market microstructure effects. "
     "Use for educational purposes; this is not investment advice."
 )
-

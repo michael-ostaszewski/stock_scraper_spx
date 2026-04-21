@@ -10,6 +10,10 @@ import streamlit as st
 from textwrap import dedent
 
 from app_auth import require_auth
+from stock_scanner_data import (
+    load_scanner_available_dates,
+    load_scanner_snapshot_for_date,
+)
 
 # ---------- CONFIG -----------------------------------------------------------
 st.set_page_config(page_title="Stock Scanner")
@@ -46,58 +50,25 @@ Zbuduj własny skaner spółek z codziennych snapshotów metryk (Finviz-like).
 Wybierz **datę**, zastosuj **preset** albo dodaj własne filtry. Zapisz wynik do CSV.
 """)
 
-# ---------- CACHING & LOAD ---------------------------------------------------
-@st.cache_data(show_spinner=False)
-def load_csv(path: str) -> pd.DataFrame:
-    df_ = pd.read_csv(
-        path,
-        parse_dates=["recorded_at_utc"],
-        infer_datetime_format=True,
-    )
-    # Wyrównanie nazw kolumn (czasem CSVy potrafią mieć spacje niełamliwe)
-    df_.columns = [c.replace("\xa0", " ").strip() for c in df_.columns]
-    return df_
-
-@st.cache_data(show_spinner=False)
-def load_from_upload(file) -> pd.DataFrame:
-    df_ = pd.read_csv(
-        file,
-        parse_dates=["recorded_at_utc"],
-        infer_datetime_format=True,
-    )
-    df_.columns = [c.replace("\xa0", " ").strip() for c in df_.columns]
-    return df_
-
-# ---------- DATA SOURCE (fixed path) ----------------------------------------
+# ---------- DATA SOURCE (database only) -------------------------------------
 sb = st.sidebar
 sb.header("Ustawienia danych")
 
-DEFAULT_PATH = "/Users/michal/PycharmProjects/Stock Scraper/Stocks fv/finviz_snapshot_clean.csv"
-
-@st.cache_data(show_spinner=False)
-def load_data_fixed(path: str) -> pd.DataFrame:
-    # używamy wcześniejszego load_csv, żeby zachować parse_dates i czyszczenie nagłówków
-    return load_csv(path)
-
 try:
-    df_full = load_data_fixed(DEFAULT_PATH)
+    dates_available = load_scanner_available_dates()
 except Exception as e:
-    st.error(f"Nie udało się wczytać CSV z lokalizacji:\n{DEFAULT_PATH}\n\nSzczegóły: {e}")
+    st.error(
+        "Nie udało się pobrać dostępnych dat sesji z bazy "
+        "(market.view_finviz_snapshot_scanner).\n\n"
+        f"Szczegóły: {e}"
+    )
     st.stop()
 
-if df_full is None or df_full.empty:
-    st.error(f"Brak danych w pliku: {DEFAULT_PATH}")
+if not dates_available:
+    st.error("Brak dostępnych dat sesji w bazie (market.view_finviz_snapshot_scanner).")
     st.stop()
-
-# sb.caption(f"Źródło danych: `{DEFAULT_PATH}`")
 
 # ---------- DATE SELECTION ---------------------------------------------------
-if "recorded_at_utc" not in df_full.columns:
-    st.error("Brak kolumny **recorded_at_utc** – nie mogę wybrać sesji.")
-    st.stop()
-
-df_full["record_date"] = df_full["recorded_at_utc"].dt.date
-dates_available = sorted(df_full["record_date"].dropna().unique())
 default_date = dates_available[-1]
 
 chosen_date = sb.date_input(
@@ -106,7 +77,16 @@ chosen_date = sb.date_input(
     min_value=dates_available[0],
     max_value=dates_available[-1],
 )
-df = df_full[df_full["record_date"] == chosen_date].copy()
+
+try:
+    df = load_scanner_snapshot_for_date(chosen_date).copy()
+except Exception as e:
+    st.error(
+        "Nie udało się pobrać danych sesji z bazy "
+        "(market.view_finviz_snapshot_scanner).\n\n"
+        f"Szczegóły: {e}"
+    )
+    st.stop()
 
 if df.empty:
     st.error("Brak danych dla wybranej daty.")
@@ -684,168 +664,116 @@ def apply_filters(df_in: pd.DataFrame) -> pd.DataFrame:
 
 df_scanned = apply_filters(df)
 
+enable_debug_funnel = sb.checkbox(
+    "Włącz debug funnel (cięższe obliczenia)",
+    value=False,
+    help="Gdy wyłączone, blok self-check nie wykonuje dodatkowych obliczeń.",
+)
 
-# with st.expander("🔧 Debug filtrów (self-check)", expanded=False):
-#     tmp = df.copy()
-#     for f in st.session_state["scanner_filters"]:
-#         col, op, val = f["col"], _norm_op(f["op"]), f["val"]
-#         if col not in tmp.columns:
-#             st.write(f"❌ Brak kolumny: {col}")
-#             continue
-#         s = pd.to_numeric(tmp[col], errors="coerce") if is_num_col(tmp[col]) else tmp[col].astype(str)
-#         before = len(tmp)
-#         # policz tylko maskę, bez modyfikacji tmp
-#         if is_num_col(tmp[col]):
-#             if op == "≥": mask = s >= float(val)
-#             elif op == "≤": mask = s <= float(val)
-#             elif op == ">": mask = s > float(val)
-#             elif op == "<": mask = s < float(val)
-#             elif op == "=": mask = s == float(val)
-#             elif op == "≠": mask = s != float(val)
-#             elif op == "between":
-#                 lo, hi = val; mask = s.between(float(lo), float(hi), inclusive="both")
-#             else: mask = pd.Series(False, index=s.index)
-#         else:
-#             if op in ("=", "=="): mask = (s == str(val))
-#             elif op in ("≠", "!="): mask = (s != str(val))
-#             elif op == "contains": mask = s.str.contains(str(val), case=False, na=False)
-#             else: mask = pd.Series(False, index=s.index)
-#
-#         st.write(f"• `{col}` {op} {val}  →  pasuje: {int(mask.sum())} / {before}")
+if enable_debug_funnel:
+    with st.expander("🔧 Debug filtrów (self-check)", expanded=False):
+        include_universe = st.checkbox(
+            "Uwzględnij szybkie filtry (indeksy / Market Cap / Price / EPS+)",
+            value=True,
+        )
 
+        stages: list[tuple[str, int]] = []
+        current = df.copy()
+        stages.append(("Start (wszystkie)", len(current)))
 
-with st.expander("🔧 Debug filtrów (self-check)", expanded=False):
-    include_universe = st.checkbox(
-        "Uwzględnij szybkie filtry (indeksy / Market Cap / Price / EPS+)",
-        value=True
-    )
+        if include_universe:
+            checked_cols = [c for c, on in index_flags.items() if on and c in current.columns]
+            if checked_cols:
+                mask = np.zeros(len(current), dtype=bool)
+                for c in checked_cols:
+                    mask |= (pd.to_numeric(current[c], errors="coerce").fillna(0).astype(int) == 1)
+                current = current[mask]
+                used_labels = [lbl for lbl, col in index_cols.items() if index_flags.get(col, False)]
+                stages.append((f"Indeksy: {', '.join(used_labels)}", len(current)))
 
-    # --- Etapy do lejka (kumulatywnie) -------------------------------------
-    stages: list[tuple[str, int]] = []
-    stage_rows = []  # do tabeli
-    current = df.copy()
-    stages.append(("Start (wszystkie)", len(current)))
+            if mc_min is not None and mc_max is not None and "Market Cap" in current.columns:
+                s = pd.to_numeric(current["Market Cap"], errors="coerce")
+                current = current[s.between(float(mc_min), float(mc_max), inclusive="both")]
+                stages.append((f"Market Cap [{safe_fmt_money(mc_min)} .. {safe_fmt_money(mc_max)}]", len(current)))
 
-    # -- 1) Szybkie filtry (opcjonalnie w lejku)
-    if include_universe:
-        # Indeksy (OR po zaznaczonych)
-        checked_cols = [c for c, on in index_flags.items() if on and c in current.columns]
-        if checked_cols:
-            mask = np.zeros(len(current), dtype=bool)
-            for c in checked_cols:
-                mask |= (pd.to_numeric(current[c], errors="coerce").fillna(0).astype(int) == 1)
-            before = len(current)
-            matched = int(mask.sum())
-            current = current[mask]
-            after = len(current)
-            used_labels = [lbl for lbl, col in index_cols.items() if index_flags.get(col, False)]
-            label = f"Indeksy: {', '.join(used_labels)}"
-            stages.append((label, after))
-            stage_rows.append({"Krok": "Uni", "Filtr": label, "Przed": before, "Pasuje": matched,
-                               "Po": after, "Drop-off %": round((1 - after / before) * 100, 2) if before else 0.0})
+            if price_min is not None and price_max is not None and "Price" in current.columns:
+                s = pd.to_numeric(current["Price"], errors="coerce")
+                current = current[s.between(float(price_min), float(price_max), inclusive="both")]
+                stages.append((f"Cena [{float(price_min):.2f} .. {float(price_max):.2f}]", len(current)))
 
-        # Market Cap
-        if mc_min is not None and mc_max is not None and "Market Cap" in current.columns:
-            s = pd.to_numeric(current["Market Cap"], errors="coerce")
-            before = len(current)
-            mask = s.between(float(mc_min), float(mc_max), inclusive="both")
-            matched = int(mask.sum())
-            current = current[mask]
-            after = len(current)
-            label = f"Market Cap [{safe_fmt_money(mc_min)} .. {safe_fmt_money(mc_max)}]"
-            stages.append((label, after))
-            stage_rows.append({"Krok": "Uni", "Filtr": label, "Przed": before, "Pasuje": matched,
-                               "Po": after, "Drop-off %": round((1 - after / before) * 100, 2) if before else 0.0})
+            if only_positive_eps and "EPS (ttm)" in current.columns:
+                s = pd.to_numeric(current["EPS (ttm)"], errors="coerce")
+                current = current[s > 0]
+                stages.append(("EPS (ttm) > 0", len(current)))
 
-        # Price
-        if price_min is not None and price_max is not None and "Price" in current.columns:
-            s = pd.to_numeric(current["Price"], errors="coerce")
-            before = len(current)
-            mask = s.between(float(price_min), float(price_max), inclusive="both")
-            matched = int(mask.sum())
-            current = current[mask]
-            after = len(current)
-            label = f"Cena [{float(price_min):.2f} .. {float(price_max):.2f}]"
-            stages.append((label, after))
-            stage_rows.append({"Krok": "Uni", "Filtr": label, "Przed": before, "Pasuje": matched,
-                               "Po": after, "Drop-off %": round((1 - after / before) * 100, 2) if before else 0.0})
+        tmp_prev = current.copy()
+        for f in st.session_state.get("scanner_filters", []):
+            col, op, val = f["col"], _norm_op(f["op"]), f["val"]
+            label_val = (
+                f"{val[0]:g}–{val[1]:g}"
+                if (op == "between" and isinstance(val, (tuple, list)))
+                else (f"{val}" if not isinstance(val, float) else f"{val:g}")
+            )
+            label = f"{col} {op} {label_val}"
 
-        # EPS dodatni
-        if only_positive_eps and "EPS (ttm)" in current.columns:
-            s = pd.to_numeric(current["EPS (ttm)"], errors="coerce")
-            before = len(current)
-            mask = s > 0
-            matched = int(mask.sum())
-            current = current[mask]
-            after = len(current)
-            label = "EPS (ttm) > 0"
-            stages.append((label, after))
-            stage_rows.append({"Krok": "Uni", "Filtr": label, "Przed": before, "Pasuje": matched,
-                               "Po": after, "Drop-off %": round((1 - after / before) * 100, 2) if before else 0.0})
+            if col not in tmp_prev.columns:
+                stages.append((f"❌ {label}", len(tmp_prev)))
+                continue
 
-    # -- 2) Filtry zaawansowane (kreator)
-    tmp_prev = current.copy()
-    for i, f in enumerate(st.session_state.get("scanner_filters", []), start=1):
-        col, op, val = f["col"], _norm_op(f["op"]), f["val"]
-        label_val = (f"{val[0]:g}–{val[1]:g}" if (op == "between" and isinstance(val, (tuple, list)))
-                     else (f"{val}" if not isinstance(val, float) else f"{val:g}"))
-        label = f"{col} {op} {label_val}"
-
-        if col not in tmp_prev.columns:
-            stage_rows.append({"Krok": i, "Filtr": f"❌ {label} (brak kolumny)", "Przed": len(tmp_prev),
-                               "Pasuje": 0, "Po": len(tmp_prev), "Drop-off %": 0.0})
-            stages.append((f"❌ {label}", len(tmp_prev)))
-            continue
-
-        s = tmp_prev[col]
-        if is_num_col(s):
-            s = pd.to_numeric(s, errors="coerce")
-            if op == "≥":       mask = s >= float(val)
-            elif op == "≤":     mask = s <= float(val)
-            elif op == ">":     mask = s > float(val)
-            elif op == "<":     mask = s < float(val)
-            elif op == "=":     mask = s == float(val)
-            elif op == "≠":     mask = s != float(val)
-            elif op == "between":
-                lo, hi = val
-                mask = s.between(float(lo), float(hi), inclusive="both")
+            s = tmp_prev[col]
+            if is_num_col(s):
+                s = pd.to_numeric(s, errors="coerce")
+                if op == "≥":
+                    mask = s >= float(val)
+                elif op == "≤":
+                    mask = s <= float(val)
+                elif op == ">":
+                    mask = s > float(val)
+                elif op == "<":
+                    mask = s < float(val)
+                elif op == "=":
+                    mask = s == float(val)
+                elif op == "≠":
+                    mask = s != float(val)
+                elif op == "between":
+                    lo, hi = val
+                    mask = s.between(float(lo), float(hi), inclusive="both")
+                else:
+                    mask = pd.Series(False, index=s.index)
             else:
-                mask = pd.Series(False, index=s.index)
-        else:
-            s = s.astype(str)
-            if op in ("=", "=="):       mask = (s == str(val))
-            elif op in ("≠", "!="):     mask = (s != str(val))
-            elif op == "contains":      mask = s.str.contains(str(val), case=False, na=False)
-            else:                       mask = pd.Series(False, index=s.index)
+                s = s.astype(str)
+                if op in ("=", "=="):
+                    mask = s == str(val)
+                elif op in ("≠", "!="):
+                    mask = s != str(val)
+                elif op == "contains":
+                    mask = s.str.contains(str(val), case=False, na=False)
+                else:
+                    mask = pd.Series(False, index=s.index)
 
-        before  = len(tmp_prev)
-        matched = int(mask.sum())
-        tmp_prev = tmp_prev[mask]
-        after   = len(tmp_prev)
-        drop    = round((1 - after / before) * 100, 2) if before else 0.0
+            tmp_prev = tmp_prev[mask]
+            stages.append((label, len(tmp_prev)))
 
-        stages.append((label, after))
-        stage_rows.append({"Krok": i, "Filtr": label, "Przed": before, "Pasuje": matched, "Po": after, "Drop-off %": drop})
-
-    # --- Wykres lejka --------------------------------------------------------
-    if len(stages) > 1:
-        labels = [s[0] for s in stages]
-        values = [s[1] for s in stages]
-
-        # Tworzymy FIGURĘ z trace typu Funnel
-        fig_funnel = go.Figure(
-            data=[go.Funnel(
-                y=labels,
-                x=values,
-                textinfo="value+percent previous"
-            )]
-        )
-        fig_funnel.update_layout(
-            height=max(620, 38 * len(labels)),
-            margin=dict(l=10, r=10, t=20, b=10)
-        )
-        st.plotly_chart(fig_funnel, use_container_width=True)
-
+        if len(stages) > 1:
+            labels = [s[0] for s in stages]
+            values = [s[1] for s in stages]
+            fig_funnel = go.Figure(
+                data=[
+                    go.Funnel(
+                        y=labels,
+                        x=values,
+                        textinfo="value+percent previous",
+                    )
+                ]
+            )
+            fig_funnel.update_layout(
+                height=max(620, 38 * len(labels)),
+                margin=dict(l=10, r=10, t=20, b=10),
+            )
+            st.plotly_chart(fig_funnel, use_container_width=True)
+else:
+    with st.expander("🔧 Debug filtrów (self-check)", expanded=False):
+        st.caption("Debug funnel jest wyłączony (domyślnie) dla szybszego działania strony.")
 
 # ---------- SORT & COLUMNS PICK ---------------------------------------------
 st.markdown("<hr>", unsafe_allow_html=True)

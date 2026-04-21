@@ -65,6 +65,29 @@ DAILY_METRICS_BASE_QUERY = text(
     """
 )
 
+FEAR_GREED_VIEW_QUERY = text(
+    """
+    select
+        date_of_record as "Date of record",
+        fear_greed_index_avg as "Fear & Greed Index"
+    from market.view_fear_greed_daily
+    order by date_of_record asc
+    """
+)
+
+FEAR_GREED_BASE_QUERY = text(
+    """
+    select
+        date_of_record as "Date of record",
+        avg(fear_greed_index) as "Fear & Greed Index"
+    from market.stocks_data
+    where date_of_record is not null
+      and fear_greed_index is not null
+    group by date_of_record
+    order by date_of_record asc
+    """
+)
+
 SELECTED_STOCKS_DAILY_QUERY = text(
     """
     select
@@ -209,7 +232,7 @@ def get_last_date() -> pd.Timestamp:
 
 
 @st.cache_data(ttl=300)
-def get_read_model_status(data_version: str) -> dict[str, bool]:
+def get_read_model_status(data_version: str) -> dict[str, object]:
     del data_version
     df = _read_sql_df(
         "get_read_model_status",
@@ -217,14 +240,33 @@ def get_read_model_status(data_version: str) -> dict[str, bool]:
             """
             select
                 to_regclass('market.mv_spx_daily_metrics') is not null as has_daily_metrics,
-                to_regclass('market.mv_spx_turtle_signals') is not null as has_turtle_signals
+                to_regclass('market.mv_spx_turtle_signals') is not null as has_turtle_signals,
+                (select max(date_of_record) from market.stocks_data) as stocks_max_date,
+                case
+                    when to_regclass('market.mv_spx_daily_metrics') is not null
+                        then (select max(date_of_record) from market.mv_spx_daily_metrics)
+                    else null
+                end as daily_metrics_mv_max_date
             """
         ),
     )
     row = df.iloc[0]
+    stocks_max_date = pd.to_datetime(row["stocks_max_date"], errors="coerce")
+    daily_metrics_mv_max_date = pd.to_datetime(
+        row["daily_metrics_mv_max_date"], errors="coerce"
+    )
+    daily_metrics_is_fresh = (
+        bool(row["has_daily_metrics"])
+        and pd.notna(stocks_max_date)
+        and pd.notna(daily_metrics_mv_max_date)
+        and stocks_max_date == daily_metrics_mv_max_date
+    )
     return {
         "has_daily_metrics": bool(row["has_daily_metrics"]),
         "has_turtle_signals": bool(row["has_turtle_signals"]),
+        "stocks_max_date": stocks_max_date,
+        "daily_metrics_mv_max_date": daily_metrics_mv_max_date,
+        "daily_metrics_is_fresh": bool(daily_metrics_is_fresh),
     }
 
 
@@ -242,15 +284,35 @@ def load_day_snapshot(date_val: pd.Timestamp, data_version: str) -> pd.DataFrame
 @st.cache_data(ttl=600)
 def load_daily_market_metrics(data_version: str) -> pd.DataFrame:
     status = get_read_model_status(data_version)
-    if status["has_daily_metrics"]:
+    if status["has_daily_metrics"] and status["daily_metrics_is_fresh"]:
         try:
             return _finalize_dates(
                 _read_sql_df("load_daily_market_metrics_mv", DAILY_METRICS_MV_QUERY)
             )
         except Exception as exc:
             print(f"[perf] load_daily_market_metrics_mv fallback: {exc}")
+    elif status["has_daily_metrics"] and not status["daily_metrics_is_fresh"]:
+        print(
+            "[perf] load_daily_market_metrics_mv stale fallback: "
+            f"mv_max_date={status['daily_metrics_mv_max_date']} "
+            f"stocks_max_date={status['stocks_max_date']}"
+        )
     return _finalize_dates(
         _read_sql_df("load_daily_market_metrics_base", DAILY_METRICS_BASE_QUERY)
+    )
+
+
+@st.cache_data(ttl=600)
+def load_fear_greed_timeseries(data_version: str) -> pd.DataFrame:
+    del data_version
+    try:
+        return _finalize_dates(
+            _read_sql_df("load_fear_greed_timeseries_view", FEAR_GREED_VIEW_QUERY)
+        )
+    except Exception as exc:
+        print(f"[perf] load_fear_greed_timeseries_view fallback: {exc}")
+    return _finalize_dates(
+        _read_sql_df("load_fear_greed_timeseries_base", FEAR_GREED_BASE_QUERY)
     )
 
 
