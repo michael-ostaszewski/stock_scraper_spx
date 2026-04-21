@@ -8,6 +8,9 @@
 venv/
 .scrapers/
 .stocks/
+sql/
+docs/
+
 
 # Python cache / build
 __pycache__/
