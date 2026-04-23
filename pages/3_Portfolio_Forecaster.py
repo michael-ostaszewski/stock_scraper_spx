@@ -4,9 +4,8 @@ import plotly.graph_objects as go
 import urllib.parse
 import datetime
 import plotly.express as px
-import yfinance as yf
 import numpy as np
-import hashlib, hmac
+import json
 import time
 from openai import OpenAI
 import io
@@ -24,6 +23,7 @@ from portfolio_forecaster_data import (
     normalize_portfolio_tickers,
 )
 from stock_forecaster_data import performance_block
+from market_data_providers import load_benchmark_close_series
 
 require_auth("Portfolio Forecaster")
 
@@ -1610,45 +1610,6 @@ else:
     # ----------------------------
     # helpers: benchmarks fetch
     # ----------------------------
-    @st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
-    def _load_benchmark_series(source_key: str, symbol: str, start_iso: str, end_iso: str) -> pd.Series:
-        start = pd.to_datetime(start_iso)
-        end = pd.to_datetime(end_iso)
-
-        if source_key == "stooq":
-            s_enc = urllib.parse.quote(symbol)
-            url = f"https://stooq.com/q/d/l/?s={s_enc}&i=d"
-            df = pd.read_csv(url)
-            if "Date" not in df.columns or "Close" not in df.columns:
-                raise ValueError(f"Unexpected Stooq format for {symbol}")
-            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-            df = df.dropna(subset=["Date"]).sort_values("Date")
-            df = df[(df["Date"] >= start) & (df["Date"] <= end)].copy()
-            s = pd.to_numeric(df["Close"], errors="coerce")
-            s.index = df["Date"].dt.normalize()
-            return s.dropna()
-
-        df = yf.download(
-            symbol,
-            start=start.strftime("%Y-%m-%d"),
-            end=(end + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
-            interval="1d",
-            auto_adjust=True,
-            progress=False
-        )
-        if df is None or df.empty:
-            return pd.Series(dtype=float)
-
-        price_col = "Adj Close" if "Adj Close" in df.columns else "Close"
-        if price_col not in df.columns:
-            return pd.Series(dtype=float)
-
-        s = df[price_col]
-        if isinstance(s, pd.DataFrame):
-            s = s.iloc[:, 0]
-        s.index = pd.to_datetime(s.index).tz_localize(None).normalize()
-        return s.dropna()
-
     def _normalize_series(s: pd.Series, mode: str) -> pd.Series:
         s = s.dropna()
         if s.empty:
@@ -1841,12 +1802,38 @@ else:
             ), secondary_y=True)
 
         # Benchmark lines
+        fallback_notes: list[str] = []
+        error_notes: list[str] = []
+        source_name = {
+            "stooq": "Stooq",
+            "yfinance": "Yahoo Finance",
+            "sp500_db": "S&P 500 DB",
+            "none": "no source",
+        }
+
         for bench_name in bench_selected:
-            sym = bench_catalog[bench_name][bench_source_key]
+            stooq_sym = bench_catalog[bench_name]["stooq"]
+            yf_sym = bench_catalog[bench_name]["yfinance"]
             try:
-                s_price = _load_benchmark_series(bench_source_key, sym, start_iso, end_iso)
+                s_price, source_used, load_errors = load_benchmark_close_series(
+                    preferred_source=bench_source_key,
+                    stooq_symbol=stooq_sym,
+                    yfinance_symbol=yf_sym,
+                    start_iso=start_iso,
+                    end_iso=end_iso,
+                    allow_sp500_db_fallback=(bench_name == "S&P 500"),
+                )
                 if s_price is None or s_price.empty:
+                    if load_errors:
+                        error_notes.append(
+                            f"{bench_name}: failed to load benchmark ({' | '.join(load_errors)})"
+                        )
                     continue
+                if source_used != bench_source_key:
+                    fallback_notes.append(
+                        f"{bench_name}: using {source_name.get(source_used, source_used)} fallback "
+                        f"(preferred: {source_name.get(bench_source_key, bench_source_key)})."
+                    )
 
                 s_price = s_price.reindex(total_equity.index).ffill().bfill()
 
@@ -1888,8 +1875,14 @@ else:
                         hovertemplate="%{x|%Y-%m-%d}<br>" + bench_name + ": %{y:.2f}<extra></extra>"
                     ), secondary_y=True)
 
-            except Exception:
+            except Exception as exc:
+                error_notes.append(f"{bench_name}: failed to render benchmark ({exc})")
                 continue
+
+        for msg in sorted(set(fallback_notes)):
+            st.info(msg)
+        for msg in sorted(set(error_notes)):
+            st.warning(msg)
 
         # ----------------------------
         # Layout
@@ -1924,11 +1917,34 @@ else:
         if base_mode == "Switch portfolio to benchmark + DCA (USD)" and bench_selected:
             try:
                 bn = bench_selected[0]
-                sym = bench_catalog[bn][bench_source_key]
+                stooq_sym = bench_catalog[bn]["stooq"]
+                yf_sym = bench_catalog[bn]["yfinance"]
 
                 # price series
-                s_price = _load_benchmark_series(bench_source_key, sym, start_iso, end_iso) \
-                    .reindex(total_equity.index).ffill().bfill()
+                s_price, source_used_metrics, load_errors_metrics = load_benchmark_close_series(
+                    preferred_source=bench_source_key,
+                    stooq_symbol=stooq_sym,
+                    yfinance_symbol=yf_sym,
+                    start_iso=start_iso,
+                    end_iso=end_iso,
+                    allow_sp500_db_fallback=(bn == "S&P 500"),
+                )
+                if s_price is None or s_price.empty:
+                    details = " | ".join(load_errors_metrics) if load_errors_metrics else "empty series"
+                    st.warning(f"{bn}: benchmark series unavailable for metrics ({details}).")
+                    raise RuntimeError(f"Missing benchmark series for {bn}")
+                if source_used_metrics != bench_source_key:
+                    source_name_metrics = {
+                        "stooq": "Stooq",
+                        "yfinance": "Yahoo Finance",
+                        "sp500_db": "S&P 500 DB",
+                    }
+                    st.info(
+                        f"{bn}: metrics calculated with {source_name_metrics.get(source_used_metrics, source_used_metrics)} "
+                        f"fallback (preferred: {source_name_metrics.get(bench_source_key, bench_source_key)})."
+                    )
+
+                s_price = s_price.reindex(total_equity.index).ffill().bfill()
 
                 # benchmark value series: initial = portfolio_start_usd, plus daily deposits
                 dca_full_usd = _dca_value_from_deposits(
@@ -2761,381 +2777,521 @@ else:
                     st.table(pd.DataFrame(pairs_sorted[-10:][::-1], columns=["A", "B", "corr"]))
 
 # ============================
-#  AI PORTFOLIO COMMENTARY (RAG-style prompt → OpenAI)
-#  — place at the very end of portfolio_forecaster page
+#  PORTFOLIO PROMPT BUILDER (PL+EN, Hybrid JSON payload)
 # ============================
 
-def _hash_sha256(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+def _to_num_series(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series.astype(str).str.replace(",", "."), errors="coerce")
 
-def _safe_rerun():
-    # backward compatible rerun
-    try:
-        st.rerun()
-    except Exception:
-        if hasattr(st, "experimental_rerun"):
-            st.experimental_rerun()
 
-def render_section_logout(section_key: str, label: str = "🔒 Log out of this section"):
-    ss_key = f"{section_key}__authed"
-    if st.session_state.get(ss_key, False):
-        if st.button(label, key=f"{section_key}__logout_main", use_container_width=True):
-            st.session_state[ss_key] = False
-            _safe_rerun()
+def _float_or_none(value, digits: int = 4):
+    if value is None or pd.isna(value):
+        return None
+    return round(float(value), digits)
 
-def check_section_access(section_key: str) -> bool:
-    """
-    Minimal password gate for a single section.
 
-    Expected secrets structure:
-      [auth]
-      passwords_plain = ["your_password1", "another_password2"]   # optional
-      passwords_sha256 = ["<sha256>", "<sha256>"]                  # optional
-    """
-    ss_key = f"{section_key}__authed"
+def _iso_date_or_none(value) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    dt = pd.to_datetime(value, errors="coerce")
+    if pd.isna(dt):
+        return None
+    return dt.date().isoformat()
 
-    # Already authenticated in this session?
-    if st.session_state.get(ss_key, False):
-        return True
 
-    cfg = st.secrets.get("auth", {})
-    plains = set(cfg.get("passwords_plain", []))
-    hashes = set(cfg.get("passwords_sha256", []))
+def _clean_for_json(obj):
+    if isinstance(obj, dict):
+        return {k: _clean_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clean_for_json(v) for v in obj]
+    if isinstance(obj, float) and (np.isnan(obj) or np.isinf(obj)):
+        return None
+    if isinstance(obj, (np.floating,)):
+        val = float(obj)
+        if np.isnan(val) or np.isinf(val):
+            return None
+        return val
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    return obj
 
-    if not plains and not hashes:
-        st.error("No passwords configured under st.secrets['auth']. Protection disabled.")
-        return False
 
-    with st.expander("🔒 This section is password-protected — click to unlock", expanded=True):
-        pw = st.text_input("Password", type="password", key=f"{section_key}__pw")
-        ok_clicked = st.button("Unlock", key=f"{section_key}__unlock", use_container_width=True)
+def _resolve_groq_api_key() -> str:
+    candidates = [
+        st.secrets.get("GROQ_API_KEY"),
+        st.secrets.get("groq_api_key"),
+    ]
+    cfg = st.secrets.get("groq", {})
+    if isinstance(cfg, dict) or hasattr(cfg, "get"):
+        candidates.extend(
+            [
+                cfg.get("GROQ_API_KEY"),
+                cfg.get("groq_api_key"),
+                cfg.get("api_key"),
+                cfg.get("key"),
+            ]
+        )
+    for value in candidates:
+        if value is None:
+            continue
+        txt = str(value).strip()
+        if txt:
+            return txt
+    return ""
 
-        if ok_clicked:
-            is_ok = any(hmac.compare_digest(pw, p) for p in plains) or (
-                pw and any(hmac.compare_digest(hashlib.sha256(pw.encode()).hexdigest(), h) for h in hashes)
+
+def _resolve_groq_model() -> str:
+    cfg = st.secrets.get("groq", {})
+    if isinstance(cfg, dict) or hasattr(cfg, "get"):
+        model = str(cfg.get("model") or "").strip()
+        if model:
+            return model
+    return "llama-3.3-70b-versatile"
+
+
+def _valuation_band(price, low, median, high) -> str | None:
+    if any(pd.isna(v) for v in [price, low, median, high]):
+        return None
+    if price < low:
+        return "below_low"
+    if price <= median:
+        return "low_to_median"
+    if price <= high:
+        return "median_to_high"
+    return "above_high"
+
+
+def _build_portfolio_prompt_payload(
+    portfolio_df_input: pd.DataFrame,
+    filtered_data_input: pd.DataFrame,
+    selected_date_input,
+    total_investment_est: float | int | None,
+    total_current_value_est: float | int | None,
+) -> dict:
+    payload_base = {
+        "meta": {
+            "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "selected_date": selected_date_input.isoformat() if hasattr(selected_date_input, "isoformat") else str(selected_date_input),
+            "data_source": [
+                "session.user_portfolio_df (uploaded XTB/CSV/manual positions)",
+                "market.view_portfolio_forecaster_day_snapshot (or fallback base query)",
+            ],
+            "prompt_format": "hybrid_markdown_plus_json",
+            "language_mode": "PL+EN",
+        },
+        "portfolio_summary": {
+            "positions_count": 0,
+            "total_cost_est": _float_or_none(total_investment_est, 2),
+            "total_current_value_est": _float_or_none(total_current_value_est, 2),
+            "unrealized_pnl_est": None,
+            "unrealized_pnl_pct_est": None,
+            "top_concentration": [],
+            "sector_allocation": [],
+        },
+        "positions": [],
+        "data_quality": {
+            "issues": [],
+            "missing_open_time_tickers": [],
+            "missing_forecast_tickers": [],
+            "missing_pe_ratio_tickers": [],
+        },
+    }
+
+    if payload_base["portfolio_summary"]["total_cost_est"] is not None and payload_base["portfolio_summary"]["total_current_value_est"] is not None:
+        pnl = payload_base["portfolio_summary"]["total_current_value_est"] - payload_base["portfolio_summary"]["total_cost_est"]
+        payload_base["portfolio_summary"]["unrealized_pnl_est"] = round(pnl, 2)
+        if payload_base["portfolio_summary"]["total_cost_est"] != 0:
+            payload_base["portfolio_summary"]["unrealized_pnl_pct_est"] = round(
+                100.0 * pnl / payload_base["portfolio_summary"]["total_cost_est"], 2
             )
-            if is_ok:
-                st.session_state[ss_key] = True
-                st.success("Access granted.")
-                _safe_rerun()
-            else:
-                st.error("Invalid password.")
 
-    return False
+    if portfolio_df_input.empty:
+        payload_base["data_quality"]["issues"].append("Portfolio is empty.")
+        return payload_base
+
+    p = portfolio_df_input.copy()
+    p["Symbol"] = p["Symbol"].astype(str).str.strip().str.upper().str.replace(r"\.US$", "", regex=True)
+    p["Type"] = p["Type"].astype(str).str.strip().str.upper()
+    p["Volume"] = _to_num_series(p["Volume"]).fillna(0.0)
+    p["Open price"] = _to_num_series(p["Open price"]).fillna(0.0)
+    p["Open time parsed"] = pd.to_datetime(p.get("Open time"), errors="coerce", dayfirst=True)
+    p["NetVolume"] = p.apply(lambda r: r["Volume"] if r["Type"] == "BUY" else -abs(r["Volume"]), axis=1)
+
+    pos = p.groupby("Symbol", as_index=False).agg({"NetVolume": "sum"})
+    pos = pos[pos["NetVolume"].abs() > 0].copy()
+    if pos.empty:
+        payload_base["data_quality"]["issues"].append("All positions net to zero.")
+        return payload_base
+
+    buys = p[p["Type"] == "BUY"].copy()
+    if not buys.empty:
+        buy_agg = buys.groupby("Symbol", as_index=False).agg(
+            buy_volume=("Volume", "sum"),
+            buy_cost=("Open price", lambda s: float((s * buys.loc[s.index, "Volume"]).sum())),
+        )
+        buy_agg["avg_open_price"] = buy_agg.apply(
+            lambda r: (r["buy_cost"] / r["buy_volume"]) if r["buy_volume"] else np.nan, axis=1
+        )
+        buy_dates = buys.groupby("Symbol", as_index=False).agg(
+            first_buy_date=("Open time parsed", "min"),
+            last_buy_date=("Open time parsed", "max"),
+        )
+    else:
+        buy_agg = pd.DataFrame(columns=["Symbol", "avg_open_price"])
+        buy_dates = pd.DataFrame(columns=["Symbol", "first_buy_date", "last_buy_date"])
+
+    uni = filtered_data_input.copy() if not filtered_data_input.empty else pd.DataFrame(columns=["Stock"])
+    if not uni.empty and "Stock" in uni.columns:
+        uni["Stock"] = uni["Stock"].astype(str).str.strip().str.upper()
+        numeric_cols = [
+            "Price",
+            "Low Forecast",
+            "Median Forecast",
+            "High Forecast",
+            "Low Forecast Percent",
+            "Median Forecast Percent",
+            "High Forecast Percent",
+            "Smart Score",
+            "Score",
+            "P/E ratio",
+            "Number of analysts",
+        ]
+        for col in numeric_cols:
+            if col in uni.columns:
+                uni[col] = _to_num_series(uni[col])
+        if "Date of record" in uni.columns:
+            uni = uni.sort_values(["Stock", "Date of record"]).groupby("Stock", as_index=False).last()
+        else:
+            uni = uni.sort_values(["Stock"]).groupby("Stock", as_index=False).last()
+
+    merged = pos.merge(uni, left_on="Symbol", right_on="Stock", how="left")
+    merged = merged.merge(buy_agg[["Symbol", "avg_open_price"]], on="Symbol", how="left")
+    merged = merged.merge(buy_dates, on="Symbol", how="left")
+
+    merged["position_value_est"] = merged["NetVolume"] * merged.get("Price", np.nan)
+    total_abs = merged["position_value_est"].abs().sum(skipna=True)
+    if total_abs and np.isfinite(total_abs):
+        merged["weight_pct"] = (merged["position_value_est"].abs() / total_abs) * 100.0
+    else:
+        merged["weight_pct"] = np.nan
+
+    merged["pct_to_median"] = ((merged.get("Median Forecast", np.nan) - merged.get("Price", np.nan)) / merged.get("Median Forecast", np.nan)) * 100.0
+    merged["pct_to_low"] = ((merged.get("Low Forecast", np.nan) - merged.get("Price", np.nan)) / merged.get("Low Forecast", np.nan)) * 100.0
+    merged["pct_above_high"] = ((merged.get("Price", np.nan) - merged.get("High Forecast", np.nan)) / merged.get("High Forecast", np.nan)) * 100.0
+
+    selected_ts = pd.Timestamp(selected_date_input)
+    positions_payload = []
+    missing_open_time = []
+    missing_forecast = []
+    missing_pe = []
+
+    for _, row in merged.sort_values("Symbol").iterrows():
+        ticker = str(row["Symbol"])
+        first_buy = row.get("first_buy_date")
+        last_buy = row.get("last_buy_date")
+        days_held = None
+        if pd.notna(first_buy):
+            days_held = int((selected_ts.normalize() - pd.Timestamp(first_buy).normalize()).days)
+
+        if pd.isna(first_buy):
+            missing_open_time.append(ticker)
+
+        if any(pd.isna(row.get(c)) for c in ["Price", "Low Forecast", "Median Forecast", "High Forecast"]):
+            missing_forecast.append(ticker)
+
+        if pd.isna(row.get("P/E ratio")):
+            missing_pe.append(ticker)
+
+        positions_payload.append(
+            {
+                "ticker": ticker,
+                "sector": None if pd.isna(row.get("Sector")) else str(row.get("Sector")),
+                "net_volume": _float_or_none(row.get("NetVolume"), 6),
+                "avg_open_price": _float_or_none(row.get("avg_open_price"), 4),
+                "current_price": _float_or_none(row.get("Price"), 4),
+                "position_value_est": _float_or_none(row.get("position_value_est"), 2),
+                "weight_pct": _float_or_none(row.get("weight_pct"), 2),
+                "first_buy_date": _iso_date_or_none(first_buy),
+                "last_buy_date": _iso_date_or_none(last_buy),
+                "days_held": days_held,
+                "forecast": {
+                    "low": _float_or_none(row.get("Low Forecast"), 4),
+                    "median": _float_or_none(row.get("Median Forecast"), 4),
+                    "high": _float_or_none(row.get("High Forecast"), 4),
+                    "low_percent": _float_or_none(row.get("Low Forecast Percent"), 2),
+                    "median_percent": _float_or_none(row.get("Median Forecast Percent"), 2),
+                    "high_percent": _float_or_none(row.get("High Forecast Percent"), 2),
+                },
+                "scores": {
+                    "smart_score": _float_or_none(row.get("Smart Score"), 2),
+                    "score": _float_or_none(row.get("Score"), 2),
+                    "pe_ratio": _float_or_none(row.get("P/E ratio"), 4),
+                    "analysts_count": _float_or_none(row.get("Number of analysts"), 0),
+                },
+                "derived_signals": {
+                    "valuation_band": _valuation_band(
+                        row.get("Price"), row.get("Low Forecast"), row.get("Median Forecast"), row.get("High Forecast")
+                    ),
+                    "pct_to_median": _float_or_none(row.get("pct_to_median"), 2),
+                    "pct_to_low": _float_or_none(row.get("pct_to_low"), 2),
+                    "pct_above_high": _float_or_none(row.get("pct_above_high"), 2),
+                },
+            }
+        )
+
+    payload_base["positions"] = positions_payload
+    payload_base["portfolio_summary"]["positions_count"] = len(positions_payload)
+
+    top_conc = (
+        merged[["Symbol", "weight_pct", "position_value_est"]]
+        .dropna(subset=["weight_pct"])
+        .sort_values("weight_pct", ascending=False)
+        .head(3)
+    )
+    payload_base["portfolio_summary"]["top_concentration"] = [
+        {
+            "ticker": str(r["Symbol"]),
+            "weight_pct": _float_or_none(r["weight_pct"], 2),
+            "position_value_est": _float_or_none(r["position_value_est"], 2),
+        }
+        for _, r in top_conc.iterrows()
+    ]
+
+    sec = merged.copy()
+    sec["sector_label"] = sec.get("Sector", pd.Series(index=sec.index, dtype=object)).fillna("Unknown")
+    sec["abs_value"] = sec["position_value_est"].abs()
+    sec_alloc = sec.groupby("sector_label", as_index=False)["abs_value"].sum()
+    total_sec = sec_alloc["abs_value"].sum()
+    if total_sec and np.isfinite(total_sec):
+        sec_alloc["weight_pct"] = (sec_alloc["abs_value"] / total_sec) * 100.0
+    payload_base["portfolio_summary"]["sector_allocation"] = [
+        {"sector": str(r["sector_label"]), "weight_pct": _float_or_none(r["weight_pct"], 2)}
+        for _, r in sec_alloc.sort_values("weight_pct", ascending=False).iterrows()
+    ]
+
+    payload_base["data_quality"]["missing_open_time_tickers"] = sorted(set(missing_open_time))
+    payload_base["data_quality"]["missing_forecast_tickers"] = sorted(set(missing_forecast))
+    payload_base["data_quality"]["missing_pe_ratio_tickers"] = sorted(set(missing_pe))
+
+    if missing_open_time:
+        payload_base["data_quality"]["issues"].append("Some tickers have missing/invalid Open time; holding period may be null.")
+    if missing_forecast:
+        payload_base["data_quality"]["issues"].append("Some tickers have missing price/forecast fields in current snapshot.")
+    if missing_pe:
+        payload_base["data_quality"]["issues"].append("Some tickers have missing P/E ratio.")
+
+    return _clean_for_json(payload_base)
+
+
+def _build_hybrid_prompt_pl(payload: dict, extra_questions: str | None = None) -> str:
+    instructions = """
+## Prompt Do Deep Research Portfela (PL)
+
+### Instrukcje
+Przeanalizuj moje portfolio w horyzoncie 12 miesięcy, bazując na danych z JSON poniżej.
+1. Oceń każdą pozycję: ryzyka, teza inwestycyjna, katalizatory, red flags.
+2. Uwzględnij wycenę względem pasma prognoz (`valuation_band`) i metryk (`smart_score`, `score`, `pe_ratio`, `analysts_count`).
+3. Zidentyfikuj koncentracje sektorowe i ryzyko pojedynczych pozycji.
+4. Zaproponuj scenariusze: bazowy / byczy / niedźwiedzi dla całego portfela.
+5. Wskaż, gdzie potrzebny jest dodatkowy research i jakie dane są brakujące (`data_quality`).
+6. Nie dawaj porady inwestycyjnej; podaj analizę, ryzyka, hipotezy i pytania kontrolne.
+
+### Oczekiwany format odpowiedzi
+- Executive summary (5-8 punktów)
+- Omówienie każdej pozycji (1 krótki akapit per ticker)
+- Mapa ryzyk portfela
+- Checklista dalszego researchu
+""".strip()
+
+    payload_json = json.dumps(payload, ensure_ascii=False, indent=2)
+    parts = [
+        instructions,
+        "### Dane wejściowe portfela (JSON)",
+        "```json",
+        payload_json,
+        "```",
+    ]
+    if extra_questions:
+        parts.extend(
+            [
+                "### Kluczowe pytania do deep research (Groq)",
+                extra_questions.strip(),
+            ]
+        )
+    return "\n\n".join(parts)
+
+
+def _build_hybrid_prompt_en(payload: dict, extra_questions: str | None = None) -> str:
+    instructions = """
+## Portfolio Deep-Research Prompt (EN)
+
+### Instructions
+Analyze my portfolio over a 12-month horizon using the JSON payload below.
+1. Review each position: thesis strength, key risks, catalysts, and red flags.
+2. Use valuation-vs-forecast context (`valuation_band`) and core metrics (`smart_score`, `score`, `pe_ratio`, `analysts_count`).
+3. Highlight concentration risk (single names + sector concentration).
+4. Provide base / bull / bear scenarios for the overall portfolio.
+5. Explicitly list what requires further web research and which fields are incomplete (`data_quality`).
+6. Do not provide financial advice; provide analytical conclusions and risk framing.
+
+### Expected output format
+- Executive summary (5-8 bullet points)
+- Position-by-position review (1 short paragraph per ticker)
+- Portfolio-level risk map
+- Actionable research checklist
+""".strip()
+
+    payload_json = json.dumps(payload, ensure_ascii=False, indent=2)
+    parts = [
+        instructions,
+        "### Portfolio payload (JSON)",
+        "```json",
+        payload_json,
+        "```",
+    ]
+    if extra_questions:
+        parts.extend(
+            [
+                "### Key Questions for Deep Research (Groq-assisted)",
+                extra_questions.strip(),
+            ]
+        )
+    return "\n\n".join(parts)
+
+
+def _generate_groq_key_questions(payload: dict, language: str = "en") -> tuple[str, str]:
+    api_key = _resolve_groq_api_key()
+    if not api_key:
+        raise ValueError("Missing Groq API key (`GROQ_API_KEY` or `[groq].api_key`).")
+
+    model = _resolve_groq_model()
+    client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+    compact_payload = {
+        "portfolio_summary": payload.get("portfolio_summary", {}),
+        "positions": payload.get("positions", [])[:25],
+        "data_quality": payload.get("data_quality", {}),
+    }
+    if language.lower().startswith("pl"):
+        user_prompt = (
+            "Stwórz zwięzłą listę 12 pytań do deep research dla tego portfela. "
+            "Pisz po polsku. Skup się na katalizatorach, ryzykach downside, koncentracji i walidacji tezy.\n\n"
+            f"PORTFOLIO_JSON:\n{json.dumps(compact_payload, ensure_ascii=False)}"
+        )
+    else:
+        user_prompt = (
+            "Create a concise list of 12 high-value due-diligence questions for this portfolio. "
+            "Write in English. Focus on catalysts, downside risks, concentration, and validation checks.\n\n"
+            f"PORTFOLIO_JSON:\n{json.dumps(compact_payload, ensure_ascii=False)}"
+        )
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You produce concise, high-signal research questions for equity portfolio due diligence."},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_tokens=500,
+        temperature=0.2,
+    )
+    return completion.choices[0].message.content.strip(), model
+
+
+if "portfolio_prompt_text_pl" not in st.session_state:
+    st.session_state["portfolio_prompt_text_pl"] = ""
+if "portfolio_prompt_text_en" not in st.session_state:
+    st.session_state["portfolio_prompt_text_en"] = ""
+if "last_click_time_portfolio_groq" not in st.session_state:
+    st.session_state["last_click_time_portfolio_groq"] = 0.0
+if "portfolio_prompt_meta" not in st.session_state:
+    st.session_state["portfolio_prompt_meta"] = {}
 
 st.markdown("<hr>", unsafe_allow_html=True)
-st.header("AI portfolio commentary")
+st.header("Portfolio Prompt Builder")
+st.caption(
+    "Generate copy-ready research prompts (Markdown + JSON) in separate Polish and English tabs for ChatGPT, Gemini or Claude, "
+    "based on your uploaded portfolio and current forecast snapshot."
+)
 
-# ---- USE: wrap your AI commentary section with the gate ----
-if check_section_access("portfolio_ai_comment"):
+use_groq_questions = st.checkbox(
+    'Add Groq-generated "Key Questions for Deep Research"',
+    value=False,
+    help="Optional add-on. Base prompt generation works without any API key.",
+)
 
-    with st.expander("Generate AI summary for my portfolio"):
+if st.button("Build portfolio research prompt"):
+    payload = _build_portfolio_prompt_payload(
+        portfolio_df_input=portfolio_df,
+        filtered_data_input=filtered_data,
+        selected_date_input=selected_date,
+        total_investment_est=total_investment,
+        total_current_value_est=total_current_value,
+    )
 
-        # simple rate limit (reuse your pattern)
-        if "last_click_time_portfolio" not in st.session_state:
-            st.session_state["last_click_time_portfolio"] = 0.0
-
-        # ——— Guardrails / data requirements ———
-        if portfolio_df.empty:
-            st.info("Your portfolio is empty — add/upload positions first.")
-        elif filtered_data.empty:
-            st.info("No forecast data available for the selected date.")
-        elif "Stock" not in filtered_data.columns:
-            st.info("No forecast universe loaded for the selected date.")
+    extra_questions_pl = None
+    extra_questions_en = None
+    groq_model_used = None
+    if use_groq_questions:
+        now = time.time()
+        if now - st.session_state["last_click_time_portfolio_groq"] < 10:
+            st.warning("Please wait 10 seconds before generating Groq key questions again.")
         else:
-            # Build a clean, compact view of current portfolio joined with forecasts
-            # 1) copy & normalize the portfolio (BUY positive, SELL negative)
-            _p = portfolio_df.copy()
-            _p["Symbol"] = _p["Symbol"].astype(str).str.upper()
-            _p["Volume"] = (
-                _p["Volume"].astype(str).str.replace(",", ".").astype(float, errors="ignore").fillna(0.0)
+            st.session_state["last_click_time_portfolio_groq"] = now
+            try:
+                with st.spinner("Generating Groq key questions..."):
+                    extra_questions_pl, groq_model_used = _generate_groq_key_questions(payload, language="pl")
+                    extra_questions_en, _ = _generate_groq_key_questions(payload, language="en")
+            except Exception as exc:
+                st.error(f"Groq add-on failed: {exc}")
+
+    prompt_text_pl = _build_hybrid_prompt_pl(payload, extra_questions=extra_questions_pl)
+    prompt_text_en = _build_hybrid_prompt_en(payload, extra_questions=extra_questions_en)
+    st.session_state["portfolio_prompt_text_pl"] = prompt_text_pl
+    st.session_state["portfolio_prompt_text_en"] = prompt_text_en
+    st.session_state["portfolio_prompt_meta"] = {
+        "generated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "positions_count": payload.get("portfolio_summary", {}).get("positions_count"),
+        "groq_model": groq_model_used,
+    }
+
+if st.session_state["portfolio_prompt_text_pl"] or st.session_state["portfolio_prompt_text_en"]:
+    meta = st.session_state.get("portfolio_prompt_meta", {})
+    generated_at = meta.get("generated_at")
+    positions_count = meta.get("positions_count")
+    groq_model = meta.get("groq_model")
+
+    st.success(
+        f"Prompt ready. Positions in payload: {positions_count if positions_count is not None else 0}."
+        + (f" Groq add-on model: {groq_model}." if groq_model else "")
+    )
+    if generated_at:
+        st.caption(f"Generated at: {generated_at}")
+    st.info("Use the language tabs below. Copy and paste the prompt into ChatGPT / Gemini / Claude.")
+    tab_pl, tab_en = st.tabs(["Polski", "English"])
+
+    with tab_pl:
+        if st.session_state["portfolio_prompt_text_pl"]:
+            st.code(st.session_state["portfolio_prompt_text_pl"], language="markdown")
+            st.download_button(
+                "Download prompt PL (.md)",
+                data=st.session_state["portfolio_prompt_text_pl"],
+                file_name=f"portfolio_research_prompt_pl_{selected_date}.md",
+                mime="text/markdown",
+                use_container_width=True,
             )
-            _p["Open price"] = (
-                _p["Open price"].astype(str).str.replace(",", ".").astype(float, errors="ignore").fillna(0.0)
+        else:
+            st.caption("Prompt PL is not available yet.")
+
+    with tab_en:
+        if st.session_state["portfolio_prompt_text_en"]:
+            st.code(st.session_state["portfolio_prompt_text_en"], language="markdown")
+            st.download_button(
+                "Download prompt EN (.md)",
+                data=st.session_state["portfolio_prompt_text_en"],
+                file_name=f"portfolio_research_prompt_en_{selected_date}.md",
+                mime="text/markdown",
+                use_container_width=True,
             )
-            _p["NetVolume"] = _p.apply(
-                lambda r: r["Volume"] if str(r["Type"]).upper() == "BUY" else -abs(r["Volume"]),
-                axis=1
-            )
-
-            # 2) aggregate to net position per ticker
-            pos = (
-                _p.groupby("Symbol", as_index=False)
-                  .agg({"NetVolume":"sum"})
-            )
-            pos = pos[pos["NetVolume"] != 0]   # leave only open positions
-
-            if pos.empty:
-                st.info("All positions net to zero — nothing to analyze.")
-            else:
-                # 3) latest prices/forecasts for the selected date
-                uni = filtered_data.copy()
-                uni["Stock"] = uni["Stock"].astype(str).str.upper()
-
-                # numeric clean-up
-                def _to_num(s):
-                    return pd.to_numeric(
-                        s.astype(str).str.replace(",", "."),
-                        errors="coerce"
-                    )
-                for c in ["Price","Low Forecast","Median Forecast","High Forecast",
-                          "Low Forecast Percent","Median Forecast Percent","High Forecast Percent",
-                          "P/E ratio","Smart Score","Score","Number of analysts"]:
-                    if c in uni.columns:
-                        uni[c] = _to_num(uni[c])
-
-                # Deduplicate to the last row per stock for that date (if multiple)
-                if "Date of record" in uni.columns:
-                    uni = (uni.sort_values(["Stock","Date of record"])
-                              .groupby("Stock", as_index=False).last())
-
-                # 4) merge portfolio net positions with forecasts
-                merged_port = pos.merge(
-                    uni,
-                    left_on="Symbol", right_on="Stock",
-                    how="left"
-                )
-
-                # average open price for context (value-weighted by signed volume)
-                _p_signed = _p.copy()
-                _p_signed["SignedCost"] = _p_signed["NetVolume"] * _p_signed["Open price"]
-                avg_open = (
-                    _p_signed.groupby("Symbol", as_index=False)
-                             .agg({"NetVolume":"sum","SignedCost":"sum"})
-                )
-                avg_open["Avg Open Price"] = avg_open.apply(
-                    lambda r: (r["SignedCost"]/r["NetVolume"]) if r["NetVolume"] else float("nan"),
-                    axis=1
-                )
-                merged_port = merged_port.merge(
-                    avg_open[["Symbol","Avg Open Price"]],
-                    on="Symbol", how="left"
-                )
-
-                # helpful deltas (% distance to forecast bands)
-                merged_port["Position Value (est.)"] = merged_port["NetVolume"] * merged_port["Price"]
-                merged_port["% below Low"]    = ((merged_port["Low Forecast"] - merged_port["Price"]) / merged_port["Low Forecast"] * 100.0)
-                merged_port["% to Median"]    = ((merged_port["Median Forecast"] - merged_port["Price"]) / merged_port["Median Forecast"] * 100.0)
-                merged_port["% above High"]   = ((merged_port["Price"] - merged_port["High Forecast"]) / merged_port["High Forecast"] * 100.0)
-
-                # Compact table for the LLM
-                cols_for_llm = [
-                    "Symbol","Sector","NetVolume","Price","Avg Open Price",
-                    "Low Forecast","Median Forecast","High Forecast",
-                    "Low Forecast Percent","Median Forecast Percent","High Forecast Percent",
-                    "Smart Score","Score","P/E ratio","Number of analysts",
-                    "Position Value (est.)","% below Low","% to Median","% above High"
-                ]
-                cols_for_llm = [c for c in cols_for_llm if c in merged_port.columns]
-                df_llm = merged_port[cols_for_llm].copy()
-
-                # light rounding to reduce token size
-                for c in df_llm.columns:
-                    if pd.api.types.is_float_dtype(df_llm[c]):
-                        df_llm[c] = df_llm[c].round(4)
-
-                # portfolio-level aggregates (context for the model)
-                port_ctx = {
-                    "total_investment_est": float(total_investment) if "total_investment" in locals() else None,
-                    "total_current_value_est": float(total_current_value) if "total_current_value" in locals() else None,
-                    "n_positions": int(df_llm.shape[0])
-                }
-
-                # ——— Prompt builder (EN) ———
-                def build_portfolio_prompt(df_payload: pd.DataFrame, context: dict) -> str:
-                    payload_csv = df_payload.to_csv(index=False)
-                    guidance = f"""
-You are a data-driven (quant) investment analyst. You will receive my current portfolio (table) and basic forecast metrics (Low/Median/High, %, Score, Smart Score, P/E, number of analysts) for each ticker.
-
-Task:
-1) If you have web browsing tools, briefly check only **material** fresh items (earnings, guidance, regulatory, M&A, product/recall, litigation) and upcoming catalysts (earnings date, lock-ups, conferences) for each ticker.  
-   • If you **cannot** browse, say so in one sentence and proceed based solely on the provided data.  
-2) For each position, assess valuation vs. forecast band: below Low (undervaluation), between Low–Median (neutral/cautious), between Median–High (overvaluation risk), or above High (hype/overvaluation).  
-3) Indicate, over a 12-month horizon, whether you see **reduce/sell risk** (strong signals: above High + weak fundamentals/newsflow) or rather **hold** (no significant red flags, data supports holding), assuming I’m a conservative investor who ignores week-to-week sentiment.  
-4) Give portfolio-level takeaways (2–4 sentences): key risks, sector/theme concentrations, expected return band by median, and whether “do nothing” vs. “trim X”.  
-5) Do **not** give financial advice — deliver analysis, risks, and conclusions only.
-
-**Portfolio context (estimates):**
-- Number of positions: {context.get("n_positions")}
-- Total cost (est.): {context.get("total_investment_est")}
-- Current value (est.): {context.get("total_current_value_est")}
-
-**Portfolio data (CSV):**
-{payload_csv}
-
-Keep it concise: one “overview” paragraph, then bullet points per ticker (max 2 sentences/ticker: [valuation signal + one fact/news + one conclusion]), and a short final summary (reduce anything or hold everything) with justification. Use the numbers from the table.
-"""
-                    return guidance.strip()
-
-                prompt_text = build_portfolio_prompt(df_llm, port_ctx)
-
-                # ============================
-                #  AI PORTFOLIO COMMENTARY — GPT-5 + web_search
-                # ============================
-
-                # 1) Model UI + (for GPT-5) reasoning/verbosity and web search toggles
-                model_choice = st.selectbox(
-                    "Choose the LLM model",
-                    ["gpt-5", "gpt-5-mini", "gpt-4o", "gpt-4o-mini"],
-                    help=("GPT-5 uses the Responses API and supports web_search. "
-                          "GPT-4o stays on Chat Completions.")
-                )
-
-                use_web_search = False
-                reasoning_effort = None
-                text_verbosity = None
-
-                if model_choice.startswith("gpt-5"):
-                    cols = st.columns(2)
-                    with cols[0]:
-                        reasoning_effort = st.selectbox(
-                            "Reasoning effort (GPT-5)",
-                            ["minimal", "low", "medium", "high"],
-                            index=2,
-                            help="Controls depth of reasoning. ‘minimal/low’ are faster, ‘high’ is more thorough."
-                        )
-                    with cols[1]:
-                        text_verbosity = st.selectbox(
-                            "Verbosity (GPT-5)",
-                            ["low", "medium", "high"],
-                            index=1,
-                            help="Steers output length. Not a hard cap."
-                        )
-                    use_web_search = st.checkbox(
-                        "Enable web search (GPT-5 Responses tool)",
-                        value=True,
-                        help="Lets the model fetch fresh information and return cited sources."
-                    )
-                    allowed_domains_str = ""
-                    if use_web_search:
-                        allowed_domains_str = st.text_input(
-                            "Allowed domains (optional, comma-separated, no https://)",
-                            value="",
-                            help="e.g., 'wsj.com, bloomberg.com, reuters.com'. Empty = no filter."
-                        )
-
-                # 2) Universal wrapper:
-                #    • gpt-5*  -> Responses API (no explicit max length; no temperature)
-                #    • gpt-4o* -> Chat Completions (with max_tokens)
-                def _llm_generate_portfolio_comment(
-                    client,
-                    model: str,
-                    system_text: str,
-                    user_text: str,
-                    reasoning: str | None = None,
-                    verbosity: str | None = None,
-                    web_search: bool = False,
-                    allowed_domains: list[str] | None = None,
-                    max_tokens_non5: int = 1400
-                ) -> tuple[str, list[str]]:
-                    """
-                    Returns (output_text, sources_urls).
-                    sources_urls — full list of URLs if web_search was used by the model.
-                    """
-                    messages = [
-                        {"role": "system", "content": system_text},
-                        {"role": "user", "content": user_text},
-                    ]
-
-                    # GPT-5 / GPT-5-mini
-                    if model.startswith("gpt-5"):
-                        req = {
-                            "model": model,
-                            "input": messages,
-                        }
-                        if reasoning:
-                            req["reasoning"] = {"effort": reasoning}
-                        if verbosity:
-                            req["text"] = {"verbosity": verbosity}
-
-                        tools = []
-                        if web_search:
-                            tool_def = {"type": "web_search"}
-                            if allowed_domains:
-                                tool_def["filters"] = {"allowed_domains": allowed_domains[:20]}
-                            tools.append(tool_def)
-                        if tools:
-                            req["tools"] = tools
-                            req["tool_choice"] = "auto"
-                            req["include"] = ["web_search_call.action.sources"]
-
-                        # no max_output_tokens per your preference
-                        resp = client.responses.create(**req)
-
-                        out_text = getattr(resp, "output_text", None)
-                        if not out_text:
-                            out_text = ""
-                            for item in getattr(resp, "output", []) or []:
-                                if item.get("type") == "message":
-                                    for c in item.get("content", []) or []:
-                                        if c.get("type") == "output_text":
-                                            out_text += c.get("text", "")
-
-                        sources = []
-                        try:
-                            for item in resp.output or []:
-                                if item.get("type") == "web_search_call":
-                                    action = item.get("action", {})
-                                    srcs = action.get("sources") or []
-                                    for s in srcs:
-                                        url = s.get("url")
-                                        if url:
-                                            sources.append(url)
-                        except Exception:
-                            pass
-
-                        return out_text.strip(), sources
-
-                    # GPT-4o / 4o-mini — Chat Completions
-                    else:
-                        cc = client.chat.completions.create(
-                            model=model,
-                            messages=messages,
-                            temperature=0.5,
-                            max_tokens=max_tokens_non5,
-                        )
-                        text = cc.choices[0].message.content.strip()
-                        return text, []
-
-                # 3) Trigger
-                if st.button("Generate AI commentary for my portfolio"):
-                    now = time.time()
-                    if now - st.session_state["last_click_time_portfolio"] < 120:
-                        st.warning("Please wait 120 seconds before requesting another commentary.")
-                    else:
-                        st.session_state["last_click_time_portfolio"] = now
-                        try:
-                            client = OpenAI(api_key=st.secrets["openai"]["OPENAI_API_KEY"])
-                            with st.spinner("Generating AI commentary…"):
-                                out_text, sources = _llm_generate_portfolio_comment(
-                                    client=client,
-                                    model=model_choice,
-                                    system_text=("You are a precise, concise quantitative analyst. "
-                                                 "Avoid investment advice; provide analysis, risks, and conclusions."),
-                                    user_text=prompt_text,
-                                    reasoning=reasoning_effort if model_choice.startswith("gpt-5") else None,
-                                    verbosity=text_verbosity if model_choice.startswith("gpt-5") else None,
-                                    web_search=(use_web_search if model_choice.startswith("gpt-5") else False),
-                                    allowed_domains=[d.strip() for d in (allowed_domains_str or "").split(",") if d.strip()] if (
-                                        use_web_search and model_choice.startswith("gpt-5")
-                                    ) else None,
-                                )
-
-                            st.success("Commentary ready:")
-                            st.write(out_text)
-
-                            if sources:
-                                with st.expander("Sources (web search)"):
-                                    for u in dict.fromkeys(sources):  # dedup
-                                        st.markdown(f"- <{u}>", unsafe_allow_html=False)
-
-                        except Exception as e:
-                            st.error(f"Failed to generate commentary (model '{model_choice}'): {e}")
-
-    render_section_logout("portfolio_ai_comment")
-    pass
-else:
-    st.stop()  # stop rendering the rest of the page below this section (optional)
+        else:
+            st.caption("Prompt EN is not available yet.")
 
 
 st.markdown("<hr>", unsafe_allow_html=True)

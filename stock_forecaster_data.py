@@ -50,43 +50,26 @@ DAILY_METRICS_MV_QUERY = text(
     """
 )
 
-DAILY_METRICS_BASE_QUERY = text(
-    """
-    select
-        date_of_record as "Date of record",
-        percentile_cont(0.5) within group (order by low_forecast_percent) as "Low Forecast Percent",
-        percentile_cont(0.5) within group (order by median_forecast_percent) as "Median Forecast Percent",
-        percentile_cont(0.5) within group (order by high_forecast_percent) as "High Forecast Percent",
-        avg(fear_greed_index) as "Fear & Greed Index",
-        avg(smart_score) as "Smart Score"
-    from market.stocks_data
-    group by date_of_record
-    order by date_of_record asc
-    """
-)
+DAILY_METRICS_COLUMNS = [
+    "Date of record",
+    "Low Forecast Percent",
+    "Median Forecast Percent",
+    "High Forecast Percent",
+    "Fear & Greed Index",
+    "Smart Score",
+]
 
-FEAR_GREED_VIEW_QUERY = text(
+FEAR_GREED_MV_QUERY = text(
     """
     select
         date_of_record as "Date of record",
         fear_greed_index_avg as "Fear & Greed Index"
-    from market.view_fear_greed_daily
+    from market.mv_spx_daily_metrics
     order by date_of_record asc
     """
 )
 
-FEAR_GREED_BASE_QUERY = text(
-    """
-    select
-        date_of_record as "Date of record",
-        avg(fear_greed_index) as "Fear & Greed Index"
-    from market.stocks_data
-    where date_of_record is not null
-      and fear_greed_index is not null
-    group by date_of_record
-    order by date_of_record asc
-    """
-)
+FEAR_GREED_COLUMNS = ["Date of record", "Fear & Greed Index"]
 
 SELECTED_STOCKS_DAILY_QUERY = text(
     """
@@ -284,22 +267,22 @@ def load_day_snapshot(date_val: pd.Timestamp, data_version: str) -> pd.DataFrame
 @st.cache_data(ttl=600)
 def load_daily_market_metrics(data_version: str) -> pd.DataFrame:
     status = get_read_model_status(data_version)
-    if status["has_daily_metrics"] and status["daily_metrics_is_fresh"]:
+    if status["has_daily_metrics"]:
+        if not status["daily_metrics_is_fresh"]:
+            print(
+                "[perf] load_daily_market_metrics_mv stale read-model: "
+                f"mv_max_date={status['daily_metrics_mv_max_date']} "
+                f"stocks_max_date={status['stocks_max_date']}"
+            )
         try:
             return _finalize_dates(
                 _read_sql_df("load_daily_market_metrics_mv", DAILY_METRICS_MV_QUERY)
             )
         except Exception as exc:
-            print(f"[perf] load_daily_market_metrics_mv fallback: {exc}")
-    elif status["has_daily_metrics"] and not status["daily_metrics_is_fresh"]:
-        print(
-            "[perf] load_daily_market_metrics_mv stale fallback: "
-            f"mv_max_date={status['daily_metrics_mv_max_date']} "
-            f"stocks_max_date={status['stocks_max_date']}"
-        )
-    return _finalize_dates(
-        _read_sql_df("load_daily_market_metrics_base", DAILY_METRICS_BASE_QUERY)
-    )
+            print(f"[perf] load_daily_market_metrics_mv unavailable: {exc}")
+    else:
+        print("[perf] load_daily_market_metrics_mv unavailable: read-model missing")
+    return _finalize_dates(pd.DataFrame(columns=DAILY_METRICS_COLUMNS))
 
 
 @st.cache_data(ttl=600)
@@ -307,13 +290,11 @@ def load_fear_greed_timeseries(data_version: str) -> pd.DataFrame:
     del data_version
     try:
         return _finalize_dates(
-            _read_sql_df("load_fear_greed_timeseries_view", FEAR_GREED_VIEW_QUERY)
+            _read_sql_df("load_fear_greed_timeseries_mv", FEAR_GREED_MV_QUERY)
         )
     except Exception as exc:
-        print(f"[perf] load_fear_greed_timeseries_view fallback: {exc}")
-    return _finalize_dates(
-        _read_sql_df("load_fear_greed_timeseries_base", FEAR_GREED_BASE_QUERY)
-    )
+        print(f"[perf] load_fear_greed_timeseries_mv unavailable: {exc}")
+    return _finalize_dates(pd.DataFrame(columns=FEAR_GREED_COLUMNS))
 
 
 @st.cache_data(ttl=600)

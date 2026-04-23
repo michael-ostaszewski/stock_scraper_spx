@@ -68,6 +68,12 @@ def clean_numeric(df: pd.DataFrame, columns: list[str]):
 
 
 st.title("Best stocks in S&P500 Index")
+st.markdown("""\
+Welcome to our website, where we aggregate and analyze data from a wide range of financial analysts to identify the
+best-performing stocks in US Stock market for ~one-year horizon. By leveraging diverse insights and 
+data science techniques, our platform offers a comprehensive view of market trends and investment opportunities.
+Explore the details to gain a deeper understanding of our top picks. Data is updated everyday around 2 PM UTC, before US Stock Market starts.
+""")
 
 last_date = get_last_date()
 data_version = last_date.date().isoformat() if pd.notna(last_date) else "no-data"
@@ -196,109 +202,134 @@ else:
 
 
 # -----------------------------
-# AI COMMENT SECTION (RAG)
+# AI COMMENT SECTION (Groq)
 # -----------------------------
-with st.expander("AI Comment About Selected Stocks"):
-    # st.subheader("AI Comment About Selected Stocks")
+# st.subheader("AI Comment About Selected Stocks")
+# st.caption(
+#     "Generate a short AI summary by Llama 70B model describing what selected companies do "
+#     "and their key metrics."
+# )
 
-    # Model selection with tooltips
-    model_choice = st.selectbox(
-        "Choose the LLM Model",
-        ["gpt-3.5-turbo", "gpt-4o-mini", "gpt-4o"],
-        help=(
-            "Select which large language model(LLM) to use for generating the AI commentary.\n"
-            "Note: Response accuracy may vary and should be verified. "
-            "Usage is limited to one comment per 2 minutes due to cost constraints.\n\n"
-            "Model Characteristics:\n\n"
-            "• gpt-3.5-turbo: Intelligence: Low, Speed: Slow\n\n"
-            "• gpt-4o-mini: Intelligence: Average, Speed: Fast\n\n"
-            "• gpt-4o: Intelligence: High, Speed: Medium\n\n"
-            # "• o3-mini: Intelligence: Higher, Speed: Medium"
+
+def _resolve_groq_api_key() -> str:
+    candidates = [
+        st.secrets.get("GROQ_API_KEY"),
+        st.secrets.get("groq_api_key"),
+    ]
+    cfg = st.secrets.get("groq", {})
+    if isinstance(cfg, dict) or hasattr(cfg, "get"):
+        candidates.extend(
+            [
+                cfg.get("GROQ_API_KEY"),
+                cfg.get("groq_api_key"),
+                cfg.get("api_key"),
+                cfg.get("key"),
+            ]
         )
+
+    for val in candidates:
+        if val is None:
+            continue
+        text = str(val).strip()
+        if text:
+            return text
+    return ""
+
+
+def _resolve_groq_model() -> str:
+    cfg = st.secrets.get("groq", {})
+    if isinstance(cfg, dict) or hasattr(cfg, "get"):
+        model = str(cfg.get("model") or "").strip()
+        if model:
+            return model
+    return "llama-3.3-70b-versatile"
+
+
+if "last_click_time" not in st.session_state:
+    st.session_state["last_click_time"] = 0.0
+
+
+def build_prompt_for_stocks(df_stocks):
+    """
+    Builds a prompt that first asks:
+    "Czym zajmuje się <TICKER>? (1–2 sentences about the business)"
+    then references the key metrics, and finally includes a short overall summary.
+    """
+
+    prompt = (
+        "You are a language model providing insights to investors based on statistical data and quantitative analysis.\n"
+        "For each stock listed below, use exactly this structure and keep each heading on a NEW line ending with a colon:\n"
+        "<TICKER> Company Description:\n"
+        "<TICKER> Key Metrics Analysis:\n\n"
+        "After all stocks, add:\n"
+        "Overall Summary:\n"
+        "Use 1-2 sentences per section. Do not provide investment advice.\n\n"
     )
 
-    # Initialize time limit check
-    if "last_click_time" not in st.session_state:
-        st.session_state["last_click_time"] = 0.0
-
-    def build_prompt_for_stocks(df_stocks):
-        """
-        Builds a prompt that first asks:
-        "Czym zajmuje się <TICKER>? (1–2 sentences about the business)"
-        then references the key metrics, and finally includes a short overall summary.
-        """
-
-        # Wprowadzenie do roli modelu i stylu analizy
-        prompt = (
-            "You are a language model providing insights to investors based on statistical data and quantitative analysis.\n"
-            "For each stock listed below, first address the question: \"What <STOCK> company is doing?\" "
-            "and write 1-2 sentences describing what the company does. Then analyze the key metrics (P/E ratio, Score, etc.).\n"
-            "Finally, provide a short 1-2 sentence summary.\n\n"
-        )
-
-        # Dla każdej spółki:
-        for _, row in df_stocks.iterrows():
-            ticker = row["Stock"]
-
-            # Najpierw pytanie: "Czym zajmuje się <TICKER>? (plus krótki opis biznesu)
-            prompt += f"Czym zajmuje się spółka {ticker}?\n"
-            prompt += "Please provide 1-2 sentences describing the company's business activities.\n"
-
-            # Potem informacje nt. kluczowych metryk
-            prompt += (
-                f"Key metrics for {ticker}: P/E ratio={row['P/E ratio']}, "
-                f"Median Forecast (in percents)={row['Median Forecast Percent']}%, "
-                f"Score={row['Score']}, "
-                f"Smart Score={row['Smart Score']}\n\n"
-            )
-
-        # Prośba o końcowe podsumowanie
+    for _, row in df_stocks.iterrows():
+        ticker = row["Stock"]
+        sector = row.get("Sector", "N/A")
+        prompt += f"Czym zajmuje się spółka {ticker}?\n"
+        prompt += "Please provide 1-2 sentences describing the company's business activities.\n"
         prompt += (
-            "After describing each company's business and metrics, please provide a short (1-2 sentence) overall summary. "
-            "Do not provide actual investment advice—only analysis."
+            f"Sector for {ticker}: {sector}\n"
+            f"Key metrics for {ticker}: P/E ratio={row['P/E ratio']}, "
+            f"Median Forecast (in percents)={row['Median Forecast Percent']}%, "
+            f"Score={row['Score']}, "
+            f"Smart Score={row['Smart Score']}\n\n"
         )
 
-        # st.write("**Prompt being sent to the LLM**:") #dzięŻi temu fragmentowi można wyświetlić tekst zbudowanego prompta w aplikacji
-        # st.code(prompt)
+    prompt += (
+        "Remember: every heading must start on a new line and end with ':'. "
+        "After describing each company, provide a short overall summary."
+    )
+    return prompt
 
-        return prompt
 
-    def generate_ai_comment(df_stocks, model):
-        """
-        Creates a prompt and calls Chat Completion using the openai 1.70+ library.
-        """
-        prompt = build_prompt_for_stocks(df_stocks)
-
-        # Initialize the client with our API key
-        client = OpenAI(api_key=st.secrets["openai"]["OPENAI_API_KEY"])
-
-        completion = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1400,
-            temperature=0.7
+def generate_ai_comment_with_groq(df_stocks):
+    prompt = build_prompt_for_stocks(df_stocks)
+    api_key = _resolve_groq_api_key()
+    if not api_key:
+        raise ValueError(
+            "Missing API key."
         )
 
-        # Return the generated text
-        return completion.choices[0].message.content.strip()
+    model = _resolve_groq_model()
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://api.groq.com/openai/v1",
+    )
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=1400,
+        temperature=0.7,
+    )
+    return completion.choices[0].message.content.strip(), model
 
-    # Example: we assume best_three = scoring.head(3) from your main code
-    # Make sure best_three is not empty before calling generate_ai_comment
 
-    if st.button("Generate AI Comment About Selected Stocks"):
-        current_time = time.time()
-        # Check if 60 seconds have passed since last invocation
-        if current_time - st.session_state["last_click_time"] < 120:
-            st.warning("Please wait at least 120 seconds before generating another AI comment.")
+if st.button("Generate AI comment about selected stocks"):
+    current_time = time.time()
+    if current_time - st.session_state["last_click_time"] < 10:
+        st.warning("Please wait at least 10 seconds before generating another AI comment.")
+    else:
+        if best_three.empty:
+            st.info("No stocks available in the result – cannot generate commentary.")
         else:
-            if best_three.empty:
-                st.info("No stocks available in the result – cannot generate commentary.")
-            else:
-                st.session_state["last_click_time"] = current_time
+            st.session_state["last_click_time"] = current_time
+            try:
                 with st.spinner("Generating AI commentary..."):
-                    ai_comment = generate_ai_comment(best_three, model_choice)
-                st.success("Here is your AI commentary:")
+                    ai_comment, used_model = generate_ai_comment_with_groq(best_three)
+            except Exception as e:
+                st.error(f"Failed to generate commentary via Groq: {e}")
+            else:
+                st.success(f"Here is your AI commentary (model: {used_model}):")
                 st.write(ai_comment)
+
+st.caption(
+    "Generate a short AI summary by Llama 70B model describing what selected companies do "
+    "and their key metrics."
+)
 
 
 
@@ -311,12 +342,12 @@ with st.expander("AI Comment About Selected Stocks"):
 #                 Data on the page is updated everyday morning around 8 AM UTC. Remember that investing is connected with
 #                 risk and you can lose your money. Our site is not financial advice.""")
 
-st.markdown("""\
-Welcome to our website, where we aggregate and analyze data from a wide range of financial analysts to identify the
-best-performing stocks in the S&P 500 over a one-year horizon. By leveraging diverse insights and the latest
-data science techniques, our platform offers a comprehensive view of market trends and investment opportunities.
-Explore the details to gain a deeper understanding of our top picks. Data is updated every morning around 8 AM UTC.
-""")
+# st.markdown("""\
+# Welcome to our website, where we aggregate and analyze data from a wide range of financial analysts to identify the
+# best-performing stocks in the S&P 500 over a one-year horizon. By leveraging diverse insights and the latest
+# data science techniques, our platform offers a comprehensive view of market trends and investment opportunities.
+# Explore the details to gain a deeper understanding of our top picks. Data is updated every morning around 8 AM UTC.
+# """)
 
 st.markdown("<hr>", unsafe_allow_html=True)
 # st.write("")

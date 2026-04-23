@@ -119,8 +119,8 @@ PORTFOLIO_HISTORY_BASE_QUERY = text(
 
 STOCK_UNIVERSE_QUERY = text(
     """
-    select distinct stock as "Stock"
-    from market.stocks_data
+    select stock as "Stock"
+    from market.mv_stock_universe
     order by stock asc
     """
 )
