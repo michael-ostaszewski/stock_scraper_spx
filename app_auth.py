@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import base64
+import datetime as dt
+import hmac
 import hashlib
+import json
 import secrets
 import time
 from typing import Any
@@ -9,10 +12,16 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import requests
 import streamlit as st
+try:
+    import extra_streamlit_components as stx
+except Exception:  # pragma: no cover - optional dependency in local/dev env
+    stx = None
 
 
 AUTH_SESSION_KEY = "supabase_auth_session"
 AUTH_FLASH_ERROR_KEY = "supabase_auth_flash_error"
+AUTH_PERSIST_COOKIE_NAME = "supabase_auth_persist_v1"
+AUTH_REMEMBER_DAYS_DEFAULT = 7
 
 
 class AuthError(RuntimeError):
@@ -136,7 +145,130 @@ def _auth_request(
     raise AuthError(message)
 
 
-def _store_session(payload: dict[str, Any]):
+def _auth_cookie_config() -> tuple[str | None, int]:
+    cfg = st.secrets.get("auth", {})
+    cookie_secret = str(cfg.get("cookie_secret") or "").strip()
+    remember_days_raw = cfg.get("remember_days")
+    try:
+        remember_days = int(remember_days_raw) if remember_days_raw is not None else AUTH_REMEMBER_DAYS_DEFAULT
+    except Exception:
+        remember_days = AUTH_REMEMBER_DAYS_DEFAULT
+    remember_days = max(1, remember_days)
+    return (cookie_secret or None, remember_days)
+
+
+def _auth_cookie_manager():
+    if stx is None:
+        return None
+    try:
+        return stx.CookieManager(key="supabase_auth_cookie_manager")
+    except Exception:
+        return None
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
+
+
+def _b64url_decode(data: str) -> bytes:
+    padded = data + "=" * ((4 - len(data) % 4) % 4)
+    return base64.urlsafe_b64decode(padded.encode("utf-8"))
+
+
+def _build_signed_auth_cookie(refresh_token: str, expires_at: int, cookie_secret: str) -> str:
+    payload = {"rt": refresh_token, "exp": int(expires_at)}
+    payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    payload_b64 = _b64url_encode(payload_json)
+    sig = hmac.new(cookie_secret.encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).digest()
+    return f"{payload_b64}.{_b64url_encode(sig)}"
+
+
+def _parse_signed_auth_cookie(cookie_value: str, cookie_secret: str) -> tuple[str, int] | None:
+    token = str(cookie_value or "").strip()
+    if "." not in token:
+        return None
+    payload_b64, sig_b64 = token.split(".", 1)
+    try:
+        expected_sig = hmac.new(
+            cookie_secret.encode("utf-8"),
+            payload_b64.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        expected_sig_b64 = _b64url_encode(expected_sig)
+        if not hmac.compare_digest(expected_sig_b64, sig_b64):
+            return None
+
+        payload_raw = _b64url_decode(payload_b64)
+        payload = json.loads(payload_raw.decode("utf-8"))
+        refresh_token = str(payload.get("rt") or "").strip()
+        expires_at = int(payload.get("exp") or 0)
+        if not refresh_token or expires_at <= int(time.time()):
+            return None
+        return (refresh_token, expires_at)
+    except Exception:
+        return None
+
+
+def _save_auth_cookie(refresh_token: str):
+    cookie_secret, remember_days = _auth_cookie_config()
+    if not cookie_secret:
+        return
+    cookie_manager = _auth_cookie_manager()
+    if cookie_manager is None:
+        return
+
+    now_ts = int(time.time())
+    cookie_exp_ts = now_ts + remember_days * 24 * 60 * 60
+    signed_value = _build_signed_auth_cookie(refresh_token, cookie_exp_ts, cookie_secret)
+    expires_at = dt.datetime.fromtimestamp(cookie_exp_ts, tz=dt.timezone.utc).replace(tzinfo=None)
+    try:
+        cookie_manager.set(
+            AUTH_PERSIST_COOKIE_NAME,
+            signed_value,
+            expires_at=expires_at,
+            key=f"{AUTH_PERSIST_COOKIE_NAME}_set",
+        )
+    except Exception:
+        return
+
+
+def _load_auth_cookie() -> str | None:
+    cookie_secret, _ = _auth_cookie_config()
+    if not cookie_secret:
+        return None
+    cookie_manager = _auth_cookie_manager()
+    if cookie_manager is None:
+        return None
+
+    try:
+        cookie_value = cookie_manager.get(AUTH_PERSIST_COOKIE_NAME)
+    except Exception:
+        return None
+    if not cookie_value:
+        return None
+
+    parsed = _parse_signed_auth_cookie(str(cookie_value), cookie_secret)
+    if not parsed:
+        _clear_auth_cookie()
+        return None
+    refresh_token, _ = parsed
+    return refresh_token
+
+
+def _clear_auth_cookie():
+    cookie_manager = _auth_cookie_manager()
+    if cookie_manager is None:
+        return
+    try:
+        cookie_manager.delete(
+            AUTH_PERSIST_COOKIE_NAME,
+            key=f"{AUTH_PERSIST_COOKIE_NAME}_delete",
+        )
+    except Exception:
+        return
+
+
+def _store_session(payload: dict[str, Any], *, persist_cookie: bool = True):
     expires_at = payload.get("expires_at")
     if not expires_at:
         expires_in = int(payload.get("expires_in") or 3600)
@@ -149,10 +281,15 @@ def _store_session(payload: dict[str, Any]):
         "user": payload.get("user") or {},
     }
     st.session_state[AUTH_SESSION_KEY] = session
+    refresh_token = str(session.get("refresh_token") or "").strip()
+    if persist_cookie and refresh_token:
+        _save_auth_cookie(refresh_token)
 
 
-def clear_auth_session():
+def clear_auth_session(*, clear_cookie: bool = True):
     st.session_state.pop(AUTH_SESSION_KEY, None)
+    if clear_cookie:
+        _clear_auth_cookie()
 
 
 def get_session_user() -> dict[str, Any] | None:
@@ -175,7 +312,7 @@ def _refresh_session() -> dict[str, Any] | None:
 
     refresh_token = str(session.get("refresh_token") or "").strip()
     if not refresh_token:
-        clear_auth_session()
+        clear_auth_session(clear_cookie=True)
         return None
 
     refreshed = _auth_request(
@@ -186,7 +323,30 @@ def _refresh_session() -> dict[str, Any] | None:
     )
     if not refreshed.get("user"):
         refreshed["user"] = session.get("user") or {}
-    _store_session(refreshed)
+    _store_session(refreshed, persist_cookie=True)
+    return st.session_state.get(AUTH_SESSION_KEY)
+
+
+def _restore_session_from_cookie() -> dict[str, Any] | None:
+    if isinstance(st.session_state.get(AUTH_SESSION_KEY), dict):
+        return st.session_state.get(AUTH_SESSION_KEY)
+
+    refresh_token = _load_auth_cookie()
+    if not refresh_token:
+        return None
+
+    try:
+        refreshed = _auth_request(
+            "POST",
+            "token",
+            params={"grant_type": "refresh_token"},
+            payload={"refresh_token": refresh_token},
+        )
+    except AuthError:
+        clear_auth_session(clear_cookie=True)
+        return None
+
+    _store_session(refreshed, persist_cookie=True)
     return st.session_state.get(AUTH_SESSION_KEY)
 
 
@@ -197,7 +357,7 @@ def get_current_session() -> dict[str, Any] | None:
 
     access_token = str(session.get("access_token") or "").strip()
     if not access_token:
-        clear_auth_session()
+        clear_auth_session(clear_cookie=True)
         return None
 
     expires_at = int(session.get("expires_at") or 0)
@@ -205,7 +365,7 @@ def get_current_session() -> dict[str, Any] | None:
         try:
             session = _refresh_session()
         except AuthError:
-            clear_auth_session()
+            clear_auth_session(clear_cookie=True)
             return None
 
     return session
@@ -223,7 +383,7 @@ def sign_in_with_password(email: str, password: str) -> dict[str, Any]:
         params={"grant_type": "password"},
         payload={"email": email_clean, "password": password_clean},
     )
-    _store_session(payload)
+    _store_session(payload, persist_cookie=True)
     return payload.get("user") or {}
 
 
@@ -345,7 +505,7 @@ def handle_oauth_callback() -> bool:
         _safe_rerun()
         return True
 
-    _store_session(payload)
+    _store_session(payload, persist_cookie=True)
     _clear_oauth_query_params()
     _safe_rerun()
     return True
@@ -363,7 +523,7 @@ def logout():
         except AuthError:
             pass
 
-    clear_auth_session()
+    clear_auth_session(clear_cookie=True)
 
 
 def _render_login_screen(page_label: str | None = None):
@@ -491,6 +651,15 @@ def require_auth(page_label: str | None = None) -> dict[str, Any]:
 
     if handle_oauth_callback():
         st.stop()
+
+    try:
+        session = _restore_session_from_cookie()
+    except AuthError as exc:
+        st.error(str(exc))
+        st.stop()
+    if session:
+        _render_auth_sidebar()
+        return session.get("user") or {}
 
     _render_login_screen(page_label=page_label)
     st.stop()

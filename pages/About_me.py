@@ -49,11 +49,13 @@
 import streamlit as st
 import base64
 import requests
+from app_auth import require_auth
 
 st.set_page_config(
     page_title="Your App Title",
     layout="centered"
 )
+require_auth("About Me")
 
 # Funkcja do konwertowania lokalnego obrazu lub pobrania go z URL
 def get_base64_image(path):
