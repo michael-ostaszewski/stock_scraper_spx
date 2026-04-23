@@ -10,6 +10,7 @@ venv/
 .stocks/
 sql/
 docs/
+dokumentacja/
 
 
 # Python cache / build
