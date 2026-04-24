@@ -1059,60 +1059,22 @@ def _render_login_screen(page_label: str | None = None):
     if flash_error:
         st.error(flash_error)
 
-    st.markdown(
-        """
-        <style>
-        .auth-google-button {
-            display: block;
-            width: 100%;
-            text-align: center;
-            padding: 0.72rem 1rem;
-            border-radius: 0.65rem;
-            background: linear-gradient(180deg, #3b82f6 0%, #2563eb 100%);
-            color: #ffffff !important;
-            text-decoration: none !important;
-            font-weight: 600;
-            box-shadow: 0 8px 20px rgba(37, 99, 235, 0.28);
-            margin: 0.15rem 0 0;
-        }
-        .auth-google-button:hover {
-            background: linear-gradient(180deg, #4f8ff8 0%, #1d4ed8 100%);
-            color: #ffffff !important;
-        }
-        .auth-google-button-disabled {
-            display: block;
-            width: 100%;
-            text-align: center;
-            padding: 0.72rem 1rem;
-            border-radius: 0.65rem;
-            background: #29415f;
-            color: #cbd5e1;
-            border: 1px solid rgba(148, 163, 184, 0.2);
-            font-weight: 600;
-            margin: 0.15rem 0 0;
-        }
-        .auth-google-recommendation {
-            margin: 0.45rem 0 0.8rem 0;
-            color: #bfdbfe;
-            font-size: 0.92rem;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
     st.markdown("##### Google Sign-In")
 
     if not terms_accepted:
-        st.markdown(
-            "<div class='auth-google-button-disabled'>Sign in with Google</div>",
-            unsafe_allow_html=True,
+        st.button(
+            "Sign in with Google",
+            type="primary",
+            use_container_width=True,
+            disabled=True,
         )
         st.caption("Accept the Privacy Notice and Terms of Use to continue.")
     elif google_cooldown_remaining > 0:
-        st.markdown(
-            "<div class='auth-google-button-disabled'>Sign in with Google</div>",
-            unsafe_allow_html=True,
+        st.button(
+            "Sign in with Google",
+            type="primary",
+            use_container_width=True,
+            disabled=True,
         )
         st.caption(
             f"Google Auth was just degraded. Wait about {google_cooldown_remaining}s before starting a fresh flow."
@@ -1123,14 +1085,18 @@ def _render_login_screen(page_label: str | None = None):
         except AuthError as exc:
             st.error(f"Google sign-in setup error: {exc}")
         else:
-            st.markdown(
-                f"<a class='auth-google-button' href='{redirect_url}' target='_self'>Sign in with Google</a>",
-                unsafe_allow_html=True,
-            )
+            if hasattr(st, "link_button"):
+                st.link_button(
+                    "Sign in with Google",
+                    redirect_url,
+                    type="primary",
+                    use_container_width=True,
+                )
+            else:
+                st.markdown(f"[Sign in with Google]({redirect_url})")
 
-    st.markdown(
-        "<div class='auth-google-recommendation'>Recommended: use Google Sign-In for the quickest and simplest access.</div>",
-        unsafe_allow_html=True,
+    st.caption(
+        "Recommended: use Google Sign-In for the quickest and simplest access."
     )
 
     with st.expander("Email and Password", expanded=False):
