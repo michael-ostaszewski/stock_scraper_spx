@@ -135,7 +135,7 @@ st.markdown("""
 
     I currently work in the energy sector, where I develop data solutions to help businesses optimize their energy costs.
 
-    I am a person who constantly strives for growth and expanding my competencies. Every new project is an opportunity to learn and refine my skills. However, I aspire to be closer to the technologies shaping the world around us, which is why I am now applying for a **Data Scientist** position. I believe that with my **experience and education**, I can bring significant value to your company.
+    I am a person who constantly strives for growth and expanding my competencies.
 
     Thanks for taking the time to read this. Feel free to **connect with me on [LinkedIn](https://www.linkedin.com/in/michael-ostaszewski/)** or check out my **[projects on GitHub](https://github.com/michael-ostaszewski/)**.
 """, unsafe_allow_html=True)
