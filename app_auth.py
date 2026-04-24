@@ -973,12 +973,18 @@ def _render_login_screen(page_label: str | None = None):
 
     st.title("Secure Sign In")
     if page_label:
-        st.caption(f"Sign in to access {page_label}.")
+        header_text = (
+            f"Sign in to access {page_label} app. "
+            "Authentication is required before market data can be accessed."
+        )
     else:
-        st.caption("Log in to access this page.")
-
-    st.info(
-        "Authentication is required before market data can be accessed."
+        header_text = (
+            "Log in to access this page. "
+            "Authentication is required before market data can be accessed."
+        )
+    st.markdown(
+        f"<p style='margin: 0 0 0.75rem 0; color: #9ca3af;'>{header_text}</p>",
+        unsafe_allow_html=True,
     )
 
     google_cooldown_remaining = 0
@@ -1021,8 +1027,8 @@ def _render_login_screen(page_label: str | None = None):
 
     with st.expander("Access Options", expanded=True):
         st.markdown(
-            "- **Email and Password**: Available for accounts provisioned by the application owner. If this is your first login with email, please contact the owner to have credentials assigned to your address.\n"
-            "- **Google Sign-In**: Recommended for self-service access. If you have previously used Google to access the platform, continue with the same option."
+            "- **Google Sign-In**: Recommended for self-service access and the fastest way to get started. If you have previously used Google to access the platform, continue with the same option.\n"
+            "- **Email and Password**: Available for accounts provisioned by the application owner. If this is your first login with email, please contact the owner to have credentials assigned to your address."
         )
 
     with st.expander("Privacy Notice and Terms of Use", expanded=False):
@@ -1053,47 +1059,63 @@ def _render_login_screen(page_label: str | None = None):
     if flash_error:
         st.error(flash_error)
 
-    with st.form("supabase_login_form", clear_on_submit=False):
-        email = st.text_input("Email", autocomplete="email")
-        password = st.text_input("Password", type="password", autocomplete="current-password")
-        submitted = st.form_submit_button(
-            "Sign in",
-            type="primary",
-            use_container_width=True,
-        )
-
-    if submitted:
-        if not terms_accepted:
-            st.error("Please review and accept the Privacy Notice and Terms of Use before signing in.")
-            return
-        try:
-            user = sign_in_with_password(email, password)
-        except AuthError as exc:
-            st.error(f"Sign-in failed: {exc}")
-        else:
-            st.success(f"Signed in as {user.get('email', 'user')}.")
-            _safe_rerun()
-
     st.markdown(
-        "<div style='text-align:center; margin: 0.75rem 0 0.5rem 0; color: #9ca3af;'>or</div>",
+        """
+        <style>
+        .auth-google-button {
+            display: block;
+            width: 100%;
+            text-align: center;
+            padding: 0.72rem 1rem;
+            border-radius: 0.65rem;
+            background: linear-gradient(180deg, #3b82f6 0%, #2563eb 100%);
+            color: #ffffff !important;
+            text-decoration: none !important;
+            font-weight: 600;
+            box-shadow: 0 8px 20px rgba(37, 99, 235, 0.28);
+            margin: 0.15rem 0 0;
+        }
+        .auth-google-button:hover {
+            background: linear-gradient(180deg, #4f8ff8 0%, #1d4ed8 100%);
+            color: #ffffff !important;
+        }
+        .auth-google-button-disabled {
+            display: block;
+            width: 100%;
+            text-align: center;
+            padding: 0.72rem 1rem;
+            border-radius: 0.65rem;
+            background: #29415f;
+            color: #cbd5e1;
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            font-weight: 600;
+            margin: 0.15rem 0 0;
+        }
+        .auth-google-recommendation {
+            margin: 0.45rem 0 0.8rem 0;
+            color: #bfdbfe;
+            font-size: 0.92rem;
+        }
+        </style>
+        """,
         unsafe_allow_html=True,
     )
 
+    st.markdown("##### Google Sign-In")
+
     if not terms_accepted:
-        st.button(
-            "Sign in with Google",
-            type="secondary",
-            use_container_width=True,
-            disabled=True,
-            help="Accept the Privacy Notice and Terms of Use to continue.",
+        st.markdown(
+            "<div class='auth-google-button-disabled'>Sign in with Google</div>",
+            unsafe_allow_html=True,
         )
+        st.caption("Accept the Privacy Notice and Terms of Use to continue.")
     elif google_cooldown_remaining > 0:
-        st.button(
-            "Sign in with Google",
-            type="secondary",
-            use_container_width=True,
-            disabled=True,
-            help=f"Auth was just degraded. Wait about {google_cooldown_remaining}s before starting a fresh flow.",
+        st.markdown(
+            "<div class='auth-google-button-disabled'>Sign in with Google</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            f"Google Auth was just degraded. Wait about {google_cooldown_remaining}s before starting a fresh flow."
         )
     else:
         try:
@@ -1101,15 +1123,38 @@ def _render_login_screen(page_label: str | None = None):
         except AuthError as exc:
             st.error(f"Google sign-in setup error: {exc}")
         else:
-            if hasattr(st, "link_button"):
-                st.link_button(
-                    "Sign in with Google",
-                    redirect_url,
-                    type="secondary",
-                    use_container_width=True,
-                )
+            st.markdown(
+                f"<a class='auth-google-button' href='{redirect_url}' target='_self'>Sign in with Google</a>",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown(
+        "<div class='auth-google-recommendation'>Recommended: use Google Sign-In for the quickest and simplest access.</div>",
+        unsafe_allow_html=True,
+    )
+
+    with st.expander("Email and Password", expanded=False):
+        st.caption("Alternative sign-in option for accounts provisioned directly by the application owner. To obtain credentials, please contact me at michael@cosmonity.com.")
+        with st.form("supabase_login_form", clear_on_submit=False):
+            email = st.text_input("Email", autocomplete="email")
+            password = st.text_input("Password", type="password", autocomplete="current-password")
+            submitted = st.form_submit_button(
+                "Sign in with email",
+                type="primary",
+                use_container_width=True,
+            )
+
+        if submitted:
+            if not terms_accepted:
+                st.error("Please review and accept the Privacy Notice and Terms of Use before signing in.")
+                return
+            try:
+                user = sign_in_with_password(email, password)
+            except AuthError as exc:
+                st.error(f"Sign-in failed: {exc}")
             else:
-                st.markdown(f"[Sign in with Google]({redirect_url})")
+                st.success(f"Signed in as {user.get('email', 'user')}.")
+                _safe_rerun()
 
 
 def _render_auth_sidebar():

@@ -12,8 +12,8 @@ from stock_forecaster_data import get_engine, log_loader_telemetry, performance_
 
 SCANNER_AVAILABLE_DATES_QUERY = text(
     """
-    select distinct ((recorded_at_utc at time zone 'UTC')::date) as record_date
-    from market.finviz_snapshot_clean
+    select record_date
+    from market.mv_finviz_snapshot_dates
     order by record_date asc
     """
 )

@@ -7,7 +7,12 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import text
 
-from stock_forecaster_data import get_engine, log_loader_telemetry, performance_block
+from stock_forecaster_data import (
+    get_engine,
+    log_loader_telemetry,
+    performance_block,
+    should_skip_heavy_fallback,
+)
 
 
 BACKTESTER_HISTORY_COLUMNS = [
@@ -49,15 +54,17 @@ AVAILABLE_DATES_BASE_QUERY = text(
 
 BACKTESTER_UNIVERSE_QUERY = text(
     """
+    select tickers, sectors
+    from market.mv_backtester_universe
+    where model_key = 'default'
+    """
+)
+
+BACKTESTER_UNIVERSE_BASE_QUERY = text(
+    """
     select
         coalesce(
-            (
-                select array_agg(stock order by stock)
-                from (
-                    select distinct stock
-                    from market.stocks_data
-                ) stocks
-            ),
+            (select array_agg(stock order by stock) from market.mv_stock_universe),
             '{}'::text[]
         ) as tickers,
         coalesce(
@@ -66,7 +73,11 @@ BACKTESTER_UNIVERSE_QUERY = text(
                 from (
                     select distinct sector
                     from market.stocks_data
-                    where sector is not null
+                    where date_of_record = (
+                        select max(date_of_record)
+                        from market.stocks_data
+                    )
+                      and sector is not null
                 ) sectors
             ),
             '{}'::text[]
@@ -76,10 +87,19 @@ BACKTESTER_UNIVERSE_QUERY = text(
 
 BACKTESTER_HISTORY_VIEW_QUERY = text(
     """
-    select *
-    from market.view_portfolio_backtester_history
-    where "Date of record" between :start_date and :end_date
-    order by "Date of record" asc, "Stock" asc
+    select
+        date_of_record as "Date of record",
+        stock as "Stock",
+        sector as "Sector",
+        closing_price as "Closing Price",
+        low_forecast as "Low Forecast",
+        smart_score as "Smart Score",
+        score as "Score",
+        low_forecast_percent as "Low Forecast Percent",
+        number_of_analysts as "Number of analysts"
+    from market.mv_backtester_history
+    where date_of_record between :start_date and :end_date
+    order by date_of_record asc, stock asc
     """
 )
 
@@ -182,6 +202,12 @@ def load_available_dates() -> list[date]:
     try:
         df = _read_sql_df("load_backtester_available_dates_mv", AVAILABLE_DATES_MV_QUERY)
     except Exception as exc:
+        if should_skip_heavy_fallback(
+            exc,
+            "load_backtester_available_dates_mv",
+            "load_backtester_available_dates_base",
+        ):
+            return []
         print(f"[perf] load_backtester_available_dates_mv fallback: {exc}")
         df = _read_sql_df("load_backtester_available_dates_base", AVAILABLE_DATES_BASE_QUERY)
 
@@ -196,7 +222,18 @@ def load_available_dates() -> list[date]:
 @st.cache_data(ttl=600)
 def load_backtester_universe(data_version: str) -> dict[str, list[str]]:
     del data_version
-    df = _read_sql_df("load_backtester_universe", BACKTESTER_UNIVERSE_QUERY)
+    try:
+        df = _read_sql_df("load_backtester_universe", BACKTESTER_UNIVERSE_QUERY)
+    except Exception as exc:
+        if should_skip_heavy_fallback(
+            exc,
+            "load_backtester_universe",
+            "load_backtester_universe_base",
+        ):
+            return {"tickers": [], "sectors": []}
+        print(f"[perf] load_backtester_universe fallback: {exc}")
+        df = _read_sql_df("load_backtester_universe_base", BACKTESTER_UNIVERSE_BASE_QUERY)
+
     if df.empty:
         return {"tickers": [], "sectors": []}
 
@@ -223,6 +260,12 @@ def load_backtest_history(start_date: date, end_date: date, data_version: str) -
             params=params,
         )
     except Exception as exc:
+        if should_skip_heavy_fallback(
+            exc,
+            "load_backtest_history_view",
+            "load_backtest_history_base",
+        ):
+            return _empty_history()
         print(f"[perf] load_backtest_history_view fallback: {exc}")
         df = _read_sql_df(
             "load_backtest_history_base",

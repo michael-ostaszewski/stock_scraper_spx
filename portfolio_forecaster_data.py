@@ -6,7 +6,12 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import bindparam, text
 
-from stock_forecaster_data import get_engine, log_loader_telemetry, performance_block
+from stock_forecaster_data import (
+    get_engine,
+    log_loader_telemetry,
+    performance_block,
+    should_skip_heavy_fallback,
+)
 
 
 PORTFOLIO_DAY_SNAPSHOT_COLUMNS = [
@@ -239,6 +244,8 @@ def load_available_dates() -> list[date]:
     try:
         df = _read_sql_df("load_available_dates_mv", AVAILABLE_DATES_MV_QUERY)
     except Exception as exc:
+        if should_skip_heavy_fallback(exc, "load_available_dates_mv", "load_available_dates_base"):
+            return []
         print(f"[perf] load_available_dates_mv fallback: {exc}")
         df = _read_sql_df("load_available_dates_base", AVAILABLE_DATES_BASE_QUERY)
 
@@ -259,6 +266,12 @@ def load_portfolio_day_snapshot(selected_date: date, data_version: str) -> pd.Da
             params={"selected_date": selected_date},
         )
     except Exception as exc:
+        if should_skip_heavy_fallback(
+            exc,
+            "load_portfolio_day_snapshot_view",
+            "load_portfolio_day_snapshot_base",
+        ):
+            return _empty_df(PORTFOLIO_DAY_SNAPSHOT_COLUMNS)
         print(f"[perf] load_portfolio_day_snapshot_view fallback: {exc}")
         df = _read_sql_df(
             "load_portfolio_day_snapshot_base",
@@ -281,6 +294,12 @@ def load_portfolio_history(tickers_key: tuple[str, ...], data_version: str) -> p
             params={"stocks": list(tickers_key)},
         )
     except Exception as exc:
+        if should_skip_heavy_fallback(
+            exc,
+            "load_portfolio_history_view",
+            "load_portfolio_history_base",
+        ):
+            return _empty_df(PORTFOLIO_HISTORY_COLUMNS)
         print(f"[perf] load_portfolio_history_view fallback: {exc}")
         df = _read_sql_df(
             "load_portfolio_history_base",

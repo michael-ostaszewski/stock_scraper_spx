@@ -7,8 +7,9 @@ import time
 import numpy as np
 import pandas as pd
 import streamlit as st
-from sqlalchemy import bindparam, create_engine, text
+from sqlalchemy import bindparam, create_engine, event, text
 from sqlalchemy.engine import URL, Engine
+from sqlalchemy.exc import DBAPIError, OperationalError, TimeoutError as SQLAlchemyTimeoutError
 
 
 DAY_SNAPSHOT_QUERY = text(
@@ -70,6 +71,16 @@ FEAR_GREED_MV_QUERY = text(
 )
 
 FEAR_GREED_COLUMNS = ["Date of record", "Fear & Greed Index"]
+
+TURTLE_SIGNAL_COLUMNS = [
+    "Date of record",
+    "Stock",
+    "Sector",
+    "Price",
+    "High20_y",
+    "Low10_y",
+    "Signal",
+]
 
 SELECTED_STOCKS_DAILY_QUERY = text(
     """
@@ -158,6 +169,93 @@ def log_loader_telemetry(
     )
 
 
+def _secret_int(cfg, key: str, default: int, minimum: int = 0) -> int:
+    try:
+        value = int(cfg.get(key, default))
+    except Exception:
+        value = default
+    return max(minimum, value)
+
+
+def _db_session_options(cfg) -> str:
+    statement_timeout_ms = _secret_int(
+        cfg,
+        "statement_timeout_ms",
+        _secret_int(cfg, "statement_timeout_seconds", 300, minimum=1) * 1000,
+        minimum=1,
+    )
+    idle_session_timeout_ms = _secret_int(
+        cfg,
+        "idle_session_timeout_ms",
+        _secret_int(cfg, "idle_session_timeout_seconds", 300, minimum=1) * 1000,
+        minimum=1,
+    )
+    return (
+        f"-c statement_timeout={statement_timeout_ms} "
+        f"-c idle_session_timeout={idle_session_timeout_ms}"
+    )
+
+
+def _db_timeout_settings(cfg) -> tuple[int, int]:
+    statement_timeout_ms = _secret_int(
+        cfg,
+        "statement_timeout_ms",
+        _secret_int(cfg, "statement_timeout_seconds", 300, minimum=1) * 1000,
+        minimum=1,
+    )
+    idle_session_timeout_ms = _secret_int(
+        cfg,
+        "idle_session_timeout_ms",
+        _secret_int(cfg, "idle_session_timeout_seconds", 300, minimum=1) * 1000,
+        minimum=1,
+    )
+    return statement_timeout_ms, idle_session_timeout_ms
+
+
+def is_transient_db_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    if "has not been populated" in message and "refresh materialized view" in message:
+        return False
+
+    if isinstance(exc, SQLAlchemyTimeoutError):
+        return True
+    if isinstance(exc, OperationalError):
+        return True
+    if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
+        return True
+
+    transient_markers = [
+        "queuepool limit",
+        "connection timed out",
+        "timeout expired",
+        "statement timeout",
+        "canceling statement due to statement timeout",
+        "connection reset",
+        "server closed the connection",
+        "ssl connection has been closed",
+        "terminating connection",
+        "could not receive data",
+        "could not send data",
+        "operation timed out",
+        "temporarily unavailable",
+        "too many connections",
+        "502",
+        "503",
+        "504",
+    ]
+    return any(marker in message for marker in transient_markers)
+
+
+def should_skip_heavy_fallback(exc: Exception, source_label: str, fallback_label: str) -> bool:
+    if not is_transient_db_error(exc):
+        return False
+    print(
+        f"[perf] {source_label} transient DB error; "
+        f"skipping heavy fallback {fallback_label}: {exc}"
+    )
+    return True
+
+
 @contextmanager
 def performance_block(label: str):
     started_at = time.perf_counter()
@@ -180,14 +278,28 @@ def get_engine() -> Engine:
         port=int(cfg["port"]),
         database=cfg["dbname"],
     )
-    return create_engine(
+    statement_timeout_ms, idle_session_timeout_ms = _db_timeout_settings(cfg)
+    engine = create_engine(
         url,
-        connect_args={"sslmode": "require"},
+        connect_args={
+            "sslmode": "require",
+            "options": _db_session_options(cfg),
+        },
         pool_pre_ping=True,
         pool_recycle=1800,
-        pool_size=1,
-        max_overflow=2,
+        pool_size=_secret_int(cfg, "pool_size", 3, minimum=1),
+        max_overflow=_secret_int(cfg, "max_overflow", 3, minimum=0),
+        pool_timeout=_secret_int(cfg, "pool_timeout", 300, minimum=1),
     )
+
+    @event.listens_for(engine, "checkout")
+    def _set_timeouts_on_checkout(dbapi_connection, connection_record, connection_proxy):
+        del connection_record, connection_proxy
+        with dbapi_connection.cursor() as cursor:
+            cursor.execute(f"set statement_timeout = {statement_timeout_ms}")
+            cursor.execute(f"set idle_session_timeout = {idle_session_timeout_ms}")
+
+    return engine
 
 
 def _read_sql_df(label: str, query, params: dict | None = None) -> pd.DataFrame:
@@ -229,26 +341,26 @@ def get_read_model_status(data_version: str) -> dict[str, object]:
                     when to_regclass('market.mv_spx_daily_metrics') is not null
                         then (select max(date_of_record) from market.mv_spx_daily_metrics)
                     else null
-                end as daily_metrics_mv_max_date
+                end as daily_metrics_read_model_max_date
             """
         ),
     )
     row = df.iloc[0]
     stocks_max_date = pd.to_datetime(row["stocks_max_date"], errors="coerce")
-    daily_metrics_mv_max_date = pd.to_datetime(
-        row["daily_metrics_mv_max_date"], errors="coerce"
+    daily_metrics_read_model_max_date = pd.to_datetime(
+        row["daily_metrics_read_model_max_date"], errors="coerce"
     )
     daily_metrics_is_fresh = (
         bool(row["has_daily_metrics"])
         and pd.notna(stocks_max_date)
-        and pd.notna(daily_metrics_mv_max_date)
-        and stocks_max_date == daily_metrics_mv_max_date
+        and pd.notna(daily_metrics_read_model_max_date)
+        and stocks_max_date == daily_metrics_read_model_max_date
     )
     return {
         "has_daily_metrics": bool(row["has_daily_metrics"]),
         "has_turtle_signals": bool(row["has_turtle_signals"]),
         "stocks_max_date": stocks_max_date,
-        "daily_metrics_mv_max_date": daily_metrics_mv_max_date,
+        "daily_metrics_read_model_max_date": daily_metrics_read_model_max_date,
         "daily_metrics_is_fresh": bool(daily_metrics_is_fresh),
     }
 
@@ -270,8 +382,8 @@ def load_daily_market_metrics(data_version: str) -> pd.DataFrame:
     if status["has_daily_metrics"]:
         if not status["daily_metrics_is_fresh"]:
             print(
-                "[perf] load_daily_market_metrics_mv stale read-model: "
-                f"mv_max_date={status['daily_metrics_mv_max_date']} "
+                "[perf] load_daily_market_metrics stale read-model: "
+                f"read_model_max_date={status['daily_metrics_read_model_max_date']} "
                 f"stocks_max_date={status['stocks_max_date']}"
             )
         try:
@@ -428,6 +540,12 @@ def load_turtle_signals(
             )
             return _finalize_dates(df)
         except Exception as exc:
+            if should_skip_heavy_fallback(
+                exc,
+                "load_turtle_signals_mv",
+                "load_turtle_signal_history_legacy",
+            ):
+                return _finalize_dates(pd.DataFrame(columns=TURTLE_SIGNAL_COLUMNS))
             print(f"[perf] load_turtle_signals_mv fallback: {exc}")
 
     df_legacy = _load_turtle_signal_history_legacy(data_version)
