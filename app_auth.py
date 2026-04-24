@@ -1059,7 +1059,7 @@ def _render_login_screen(page_label: str | None = None):
     if flash_error:
         st.error(flash_error)
 
-    st.markdown("##### Google Sign-In")
+    # st.markdown("##### Google Sign-In")
 
     if not terms_accepted:
         st.button(
