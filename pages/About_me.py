@@ -133,7 +133,7 @@ st.markdown("""
 
     To deepen my expertise, I decided to further my education. I completed a postgraduate degree in **Big Data Engineering** at the **Polish-Japanese Academy of Information Technology in Warsaw**, which provided me with a strong theoretical foundation and practical skills in analyzing large datasets. Thanks to this, I can now implement ambitious projects in my daily life using Data Science, such as this project analyzing **S&P 500 stocks** or the story of how I used Data Science to win a **12-hour cycling marathon**: [Read the story](https://www.linkedin.com/feed/update/urn:li:activity:7248368704088948738/).
 
-    Alongside developing my Data Science skills, I currently work as a **Performance Marketing Specialist** at one of the largest marketing agencies in Poland, collaborating daily with top brands in the industry. In this role, beyond using ads managing systems I use everyday tools like **Excel, Looker, and Python (mainly the Pandas library)** for data analysis and optimizing advertising campaigns. Additionally, this position has given me valuable experience in client communication, which I find extremely important—today, combining **technical expertise with strong communication skills** is crucial.
+    I currently work in the energy sector, where I develop data solutions to help businesses optimize their energy costs.
 
     I am a person who constantly strives for growth and expanding my competencies. Every new project is an opportunity to learn and refine my skills. However, I aspire to be closer to the technologies shaping the world around us, which is why I am now applying for a **Data Scientist** position. I believe that with my **experience and education**, I can bring significant value to your company.
 
